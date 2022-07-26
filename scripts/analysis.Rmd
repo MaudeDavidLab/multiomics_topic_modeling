@@ -1,0 +1,1514 @@
+---
+title: "analysis"
+output: html_document
+---
+
+```{r}
+library(vegan)
+library(phyloseq)
+library(dplyr)
+library(lme4)
+library(caret)
+library(DESeq2)
+library(ape)
+library(reshape2)
+library(randomForest)
+library(caret)
+library(KEGGREST)
+library(pROC)
+library(glmnet)
+library(patchwork)
+library(VennDiagram)
+library(ggVennDiagram)
+library(ggpubr)
+library(ggplotify)
+library(colorspace)
+library(aod)
+#library(PResiduals)
+```
+
+```{r}
+setwd("~/Lab/M3/")
+source('scripts/metadata/clean_mapping_ml.R')
+ps_16s <- readRDS("data/16s/ps_dds_nooutliers.rds")
+ps_16s <- prune_samples(ps_16s@sam_data$timepoint == "Timepoint 1", ps_16s)
+ps_mtg <- readRDS("data/mtg/ps_mtg_rle_nooutliers.rds")
+ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
+ps_mtt <- readRDS("data/mtt/ps_mtt_rle_nooutliers.rds")
+ps_mbx <- readRDS("data/mbx/ps_mbx_rle_nooutliers_fixedmapping.rds")
+
+
+#ps_contigs_mtt <- readRDS("data/archae/MTT/ps_contigs_500bp.rds")
+#archae <- as.logical(ps_contigs_mtt@tax_table[, 5] == "Archaea")
+#ps_archae_mtt <- prune_taxa(archae, ps_contigs_mtt)
+#ps_archae_mtt <- prune_taxa(rowSums(ps_archae_mtt@otu_table) > 0, ps_archae_mtt)
+
+#ps_contigs_mtg <- readRDS("data/archae/ps_contigs_500bp.rds")
+#archae <- as.logical(ps_contigs_mtg@tax_table[, 5] == "Archaea")
+#ps_archae_mtg <- prune_taxa(archae, ps_contigs_mtg)
+#ps_archae_mtg <- prune_taxa(rowSums(ps_archae_mtg@otu_table) > 0, ps_archae_mtg)
+```
+# Phyloseq MAG
+```{r}
+
+
+```
+
+```{r}
+asd_color <- "#01898D"
+td_color <- "#67A102"
+```
+
+# Venn Diagram of available omics
+```{r}
+samples_16s <- sample_names(ps_16s)
+samples_mtg <- sample_names(ps_mtg)
+samples_mtt <- sample_names(ps_mtt)
+samples_metabol <- sample_names(ps_metabol)
+samples_16s <- gsub("F1", "P1", samples_16s)
+samples_mtg <- gsub("F1", "P1", samples_mtg)
+samples_mtt <- gsub("F1", "P1", samples_mtt)
+samples_metabol <- gsub("F1", "P1", samples_metabol)
+
+#exact same samples
+p1 <- ggVennDiagram(x = list(samples_16s, samples_mtg, samples_mtt, samples_metabol),
+             category.names = c("16s", "mtg", "mtt", "metabol")) +
+  scale_fill_continuous_diverging(palette = "PurpleGreen", rev = T)+
+  scale_colour_manual(values = c("black", "black", "black", "black"))+
+  ggtitle("Omics available for the same stool sample")
+p1
+ggsave("../results/summary_statistics/venn_diagrams/omics_available_stool_sample.pdf", p1)
+#samples from same individual
+samples_16s <- ps_16s@sam_data$host_name
+samples_mtg <- ps_mtg@sam_data$host_name
+samples_mtt <- ps_mtt@sam_data$host_name
+samples_metabol <- ps_metabol@sam_data$host_name
+
+p2 <- ggVennDiagram(x = list(samples_16s, samples_mtg, samples_mtt, samples_metabol),
+             category.names = c("16s", "mtg", "mtt", "metabol")) +
+   scale_fill_continuous_diverging(palette = "PurpleGreen", rev = T)+
+  scale_colour_manual(values = c("black", "black", "black", "black"))+
+  ggtitle("Omics availabe from the same individual")
+ggsave("../results/summary_statistics/venn_diagrams/omics_available_individual.pdf", p2)
+```
+
+```{r}
+p <- ggarrange(p1, p2)
+p
+ggsave("~/Lab/M3/results/summary_statistics/venn_diagrams/omics_available.pdf", p, width= 8)
+```
+
+# Master mapping file
+```{r}
+library(plyr)
+map_16s <- ps_16s@sam_data
+map_16s$omic <- "16s"
+map_mtg <- ps_mtg@sam_data
+map_mtg$omic <- "mtg"
+map_mtt <- ps_mtt@sam_data
+map_mtt$omic <- "mtt"
+map_metabol <- ps_metabol@sam_data
+map_metabol$omic <- "metabol"
+
+map_master <- data.frame(rbind.fill(map_16s, map_mtg, map_mtt, map_metabol))
+map_master$biospecimen_name <- gsub("F1", "P1", map_master$biospecimen_name)
+map_master$biospecimen_name <- gsub("F2", "P2", map_master$biospecimen_name)
+map_master$biospecimen_name <- gsub("F3", "P3", map_master$biospecimen_name)
+map_master_one_host <- map_master[!duplicated(map_master$host_name), ]
+
+dim(map_master_one_host)
+map_master <- map_master[!duplicated(map_master$biospecimen_name), ]
+rownames(map_master) <- map_master$biospecimen_name
+```
+
+#Fix ps_mag mapping
+```{r}
+ps_mag <- readRDS("../data/mag/only_length_adjusted_MAG_ps.rds")
+sample_names(ps_mag) <- ps_mag@sam_data$Biospecimen.Name
+samples <- sample_names(ps_mag)[samples %in% map_master$biospecimen_name]
+sample_data(ps_mag) <- sample_data(map_master[samples, ])
+saveRDS(ps_mag, "../data/mtg/ps_mag_fixed_mapping.rds")
+
+```
+
+
+# Age histogram
+```{r, fig.height = 2, fig.width = 3}
+map_master_one_host$age <- as.numeric(map_master_one_host$age)
+p <- ggplot(map_master_one_host) + geom_histogram(aes(x = age/12, stat = "count",  fill = phenotype), color = 'grey',  alpha = 0.3) + ylab("Count") + xlab("Age in years") + theme_classic() + scale_fill_manual(values = list("A" = asd_color, "N" = td_color))+ scale_color_manual(values = list("A" = asd_color, "N" = td_color))
+p
+ggsave("~/Lab/M3/results/summary_statistics/age_histogram.pdf", p, width = 3, height = 3)
+```
+
+# Select distance metrics based on family proximity
+```{r}
+# distance_choices.R
+```
+
+# Mantel tests comparing distances between samples using different omics
+```{r}
+# create two distance matrices using two omics, then mantel test between the distance matrices
+# answers the question: how closely do different omics compare to one another in distinguishing between samples
+source("summary_statistics/comparing_omics.R")
+tmp <- getHeatmaps(ps_16s, ps_mtg, ps_mtt, ps_mbx)
+p <- tmp
+
+ggsave("../results/summary_statistics/comparing_omics.pdf", p, width = 8, height = 4)
+```
+
+# Which dietary variables should be included in DA
+```{r}
+runPermanova <- function(ps, samples, variables, distance_metric){
+  set.seed(2)
+  ps_use <- prune_samples(samples, ps)
+  data <-  data.frame(sample_data(ps_use))
+  keep <- complete.cases(data[,variables])
+  
+  ps_use <- prune_samples(sample_names(ps_use)[keep], ps_use)
+  data <-  data.frame(sample_data(ps_use))
+  
+  d <- vegdist(t(otu_table(ps_use)), method = distance_metric)
+  distances <-  as.data.frame(as.matrix(d))
+  res <- lapply(variables, function(var){
+    f <- formula(paste("distances ~", var))
+    res <- adonis(f, data= data, permutations = 2000, method = distance_metric)
+    return(as.numeric(res$aov.tab[var, ]))
+  })
+  df <- do.call(rbind, res)
+  rownames(df) <- variables
+  colnames(df) <- c("DF", "SumsOfSqs", "MeanSqs", "F.Model", "R2", "Pval")
+  return(data.frame(df))
+}
+
+plotPermanova <- function(res_16s_df, res_mtg_df, res_mtt_df, res_mbx_df, opacity = 0.9, title = ""){
+  #visualize
+  res_16s_df$category <- rownames(res_16s_df )
+  res_mtg_df$category <- rownames(res_mtg_df )
+  res_mtt_df$category <- rownames(res_mtt_df)
+  res_mbx_df$category <- rownames(res_mbx_df)
+  
+  df <- data.frame(cbind(res_16s_df$R2,res_mtg_df$R2, res_mtt_df$R2, res_mbx_df$R2))
+  rownames(df) <- res_mtg_df$category
+  colnames(df) <- c("16s", "MTG", "MTT", "MBX")
+  df <- df * 100
+  
+  df_pval <- data.frame(cbind(res_16s_df$Pval,res_mtg_df$Pval, res_mtt_df$Pval, res_mbx_df$Pval))
+  rownames(df_pval) <- res_mtg_df$category
+  colnames(df_pval) <- c("16s", "MTG", "MTT", "MBX")
+  
+  df_annotate <- mapply(function(x, y){
+    sig <- ifelse(y < .05, "*", "")
+    return(paste(round(x, 2), sig, "%"))
+  }, df, df_pval)
+  
+  quantile_breaks <- function(xs, n = 10) {
+    breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+    return(breaks[!duplicated(breaks)])
+  }
+
+mat_breaks <- quantile_breaks(unlist(df), n = 90)
+
+p <- pheatmap(df,
+           color = diverging_hcl(100, palette = "PurpleGreen", rev = T, alpha = opacity),
+           breaks = mat_breaks,
+           display_numbers = df_annotate,
+           fontsize_number=15,
+           cellheight=20,
+           number_color = "black",
+           cluster_cols = F,
+           fontsize_col = 14,
+           fontsize_row = 14)
+  
+  #df <- data.frame(rbind(res_16s_df,res_mtg_df, res_mtt_df, res_mbx_df))
+  #df$omic <- c(rep("16s", nrow(res_16s_df)), rep("mtg", nrow(res_mtg_df)), rep("mtt", nrow(res_mtt_df)), rep("mbx", nrow(res_mbx_df)))
+  ##df <- df[ , c("R2", "category", "Pval", "omic")]
+  #colnames(df) <- c("R2","category", "pvalue", "omic")
+  #df$sig <- ifelse(df$pvalue < alpha, "*", "")
+  
+  #df$R2 <- round(df$R2, 3)
+  
+  #tmp <- df %>% group_by(category) %>% summarise(max(R2))
+  #order_use <- order(tmp$`max(R2)`, decreasing = T)
+  
+  #df$category <- factor(df$category, levels = tmp$category[order_use])
+  #df$omic <- factor(df$omic, levels = c("16s", "mtg", "mtt", "mbx"))
+  #df$R2 <- df$R2 * 100
+  #p <- ggplot(df, aes(x = omic, y = category, fill = R2)) + geom_raster() +
+  #   ggtitle(title)+
+  #    geom_text(aes(label = paste(R2, "%", sig)), size = 5) +
+  #    scale_fill_continuous_diverging(palette = "PurpleGreen")+
+  #    theme_bw() + theme(text = element_text(size = 14), axis.text=element_text(size=14))
+  #p
+  
+  return(p)
+}
+```
+
+# Permanova diet
+```{r}
+dietary_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food","starchy_food", "meats_and_seafood", "bread", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq")
+
+distance_metric <- "manhattan"
+res_16s <- runPermanova(ps_16s, sample_names(ps_16s), dietary_variables, distance_metric)
+saveRDS(res_16s, paste0("../results/summary_statistics/permanova_res_16s_diet_", distance_metric, ".rds"))
+res_mtg <- runPermanova(ps_mtg, sample_names(ps_mtg), dietary_variables, distance_metric)
+saveRDS(res_mtg, paste0("../results/summary_statistics/permanova_res_mtg_diet_", distance_metric, ".rds"))
+res_mtt <- runPermanova(ps_mtt, sample_names(ps_mtt), dietary_variables, distance_metric)
+saveRDS(res_mtt, paste0("../results/summary_statistics/permanova_res_mtt_diet_", distance_metric, ".rds"))
+res_mbx <- runPermanova(ps_metabol, sample_names(ps_mbx), dietary_variables, distance_metric)
+saveRDS(res_mbx, paste0("../results/summary_statistics/permanova_res_metabol_diet_", distance_metric, ".rds"))
+
+
+res_16s_df <- readRDS(paste0("../results/summary_statistics/permanova_res_16s_diet_", distance_metric, ".rds"))
+res_mtg_df <- readRDS(paste0("../results/summary_statistics/permanova_res_mtg_diet_", distance_metric, ".rds"))
+res_mtt_df <- readRDS(paste0("../results/summary_statistics/permanova_res_mtt_diet_", distance_metric, ".rds"))
+res_mbx_df <- readRDS(paste0("../results/summary_statistics/permanova_res_metabol_diet_", distance_metric, ".rds"))
+
+p <- plotPermanova(res_16s_df, res_mtg_df, res_mtt_df, res_mbx_df, opacity = 0.9)
+
+
+ggsave(paste0("../results/summary_statistics/omic_diet_explainability_", distance_metric, ".pdf"), p, width= 9, height = 7)
+ggsave(paste0("../results/summary_statistics/omic_diet_explainability_", distance_metric, ".png"), p, width= 9, height = 7)
+```
+
+
+
+
+
+# Permanova lifestyle
+```{r}
+cleanVariables <- function(ps){
+  ps@sam_data$age <- as.numeric(ps@sam_data$age)
+  ps@sam_data$stool_freq <- as.numeric(ps@sam_data$stool_freq)
+  ps@sam_data$probiotic <- as.numeric(ps@sam_data$probiotic)
+  ps@sam_data$vitamin_B <- as.numeric(ps@sam_data$vitamin_B)
+  
+  ps@sam_data$csection[ps@sam_data$csection == "True"] = "TRUE"
+  ps@sam_data$csection[ps@sam_data$csection == "False"] = "FALSE"
+  ps@sam_data$csection <- as.character(ps@sam_data$csection)
+  
+  ps@sam_data$dog[ps@sam_data$dog == "True"] = "TRUE"
+  ps@sam_data$dog[ps@sam_data$dog == "False"] = "FALSE"
+  ps@sam_data$dog <- as.character(ps@sam_data$dog)
+  
+  ps@sam_data$dog[ps@sam_data$dog == "True"] = "TRUE"
+  ps@sam_data$dog[ps@sam_data$dog == "False"] = "FALSE"
+  ps@sam_data$dog <- as.character(ps@sam_data$dog)
+  
+  ps@sam_data$dietary_supplement[ps@sam_data$dietary_supplement == "True"] = "TRUE"
+  ps@sam_data$dietary_supplement[ps@sam_data$dietary_supplement == "False"] = "FALSE"
+  ps@sam_data$dietary_supplement <- as.character(ps@sam_data$dietary_supplement)
+  
+  
+  return(ps)
+}
+
+variables <- c( "racial_group", "sex", "age", "stool_freq", "csection", "probiotic", "dietary_supplement", "dog", "phenotype")
+ps_16s <- cleanVariables(ps_16s)
+ps_16s <- prune_samples(ps_16s@sam_data$timepoint == "Timepoint 1", ps_16s)
+res_16s_df <- runPermanova(ps_16s, sample_names(ps_16s), variables, "manhattan")
+saveRDS(res_16s_df, "../results/summary_statistics/permanova_res_16s_lifestyle_manhattan.rds")
+
+ps_mtg <- cleanVariables(ps_mtg)
+res_mtg_df <- runPermanova(ps_mtg, sample_names(ps_mtg), variables, "manhattan")
+saveRDS(res_mtg_df, "../results/summary_statistics/permanova_res_mtg_lifestyle_manhattan.rds")
+
+ps_mtt <- cleanVariables(ps_mtt)
+res_mtt_df <- runPermanova(ps_mtt, sample_names(ps_mtt), variables, "manhattan")
+saveRDS(res_mtt_df, "../results/summary_statistics/permanova_res_mtt_lifestyle_manhattan.rds")
+
+ps_mbx <- cleanVariables(ps_mbx)
+res_mbx_df <- runPermanova(ps_mbx, sample_names(ps_mbx), variables, "manhattan")
+saveRDS(res_mbx_df, "../results/summary_statistics/permanova_res_mbx_lifestyle_manhattan.rds")
+
+
+res_16s_df<- readRDS("../results/summary_statistics/permanova_res_16s_lifestyle_manhattan.rds")
+res_mtg_df<- readRDS("../results/summary_statistics/permanova_res_mtg_lifestyle_manhattan.rds")
+res_mtt_df<- readRDS("../results/summary_statistics/permanova_res_mtt_lifestyle_manhattan.rds")
+res_mbx_df<- readRDS("../results/summary_statistics/permanova_res_mbx_lifestyle_manhattan.rds")
+p <- plotPermanova(res_16s_df, res_mtg_df, res_mtt_df, res_mbx_df, opacity = 0.85)
+p
+
+ggsave("~/Lab/M3/results/summary_statistics/omic_lifestyle_explainability_manhattan.pdf", p, width= 9, height = 5)
+ggsave("~/Lab/M3/results/summary_statistics/omic_lifestyle_explainability_manhattan.png", p, width= 9, height = 6)
+```
+
+
+
+# DON"T USE: Which omic most represents lifestyle? Permanova
+```{r}
+# detach("package:plyr", unload = TRUE)
+library(dplyr)
+source("summary_statistics/omic_explainability.R")
+runExplainabilityTest <- function(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric){
+  df <- getExplainability(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric) #bootstrap 10 random subsets of 50 samples to run permanova
+  tmp <- melt(df[[1]])
+
+  tmp <- tmp %>% group_by(category, variable) %>% summarize(med = median(value), sd = sd(value))
+  tmp$category <- factor(tmp$category, levels = c("Diet", "Racial Group", "Sex", "Age", "Stool_freq", "Csection", "Probiotic", "Dietary Supplement", "Vitamin B", "Dog", "Phenotype"))
+  tmp$med <- round(tmp$med, 3) * 100
+  
+  pvals <- melt(df[[2]])
+  pvals <- pvals %>% group_by(category, variable) %>% summarize(median = median(value))
+  tmp$pval <- pvals$median
+  tmp$sig <- ifelse(tmp$pval < .05, "*", "")
+  
+  tmp$med[tmp$med < 0] = 0
+
+  return(tmp)
+}
+#p_horn <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "horn")
+#p_bray <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "bray")
+#p_euclidean <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "euclidean")
+#p_manhattan <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "manhattan")
+tmp <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "bray")
+saveRDS(tmp, "../results/summary_statistics/omic_lifestyle_explainability_df.rds")
+
+tmp <- readRDS("../results/summary_statistics/omic_lifestyle_explainability_df.rds")
+tmp$sig <- ifelse(tmp$pval < .05, "*", "")
+tmp$variable <- as.character(tmp$variable)
+tmp$variable[tmp$variable == "s"] = "16s"
+tmp$variable[tmp$variable == "metabol"] = "mbx"
+tmp$variable <- factor(tmp$variable, levels = c("16s", "mtg", "mtt", "mbx"))
+p <- ggplot(tmp, aes(x = variable, y = category, fill = med)) + geom_raster() +
+  ggtitle(paste("Omic explained by lifestyle "))+
+  geom_text(aes(label = paste(med, "%", sig)), size = 5) +
+  scale_fill_continuous_sequential(palette = "Heat2")+
+  theme_bw() + theme(text = element_text(size = 14), axis.text=element_text(size=14))
+p 
+#p <- ggarrange(p_horn, p_bray, p_euclidean, p_manhattan)
+ggsave("~/Lab/M3/results/summary_statistics/omic_lifestyle_explainability.pdf", p, width= 9, height = 4)
+
+```
+
+
+
+
+# Differential analysis
+```{r}
+# from script differential_abundance
+#source("differential_abundance.R")
+# for metagenome contigs, no normalization...
+control_variables <- c("fruit", "meal_ready_eat", "olive_oil", "seafood", "sweetened_drink", "restaurant", "starchy_food", "dairy_freq")
+deseq_contigs_mtg <- runDESeq(ps_archae_mtg, dcut = 0.05, control_variables)
+saveRDS(deseq_contigs_mtg, "../results/differential_analysis/archae/mtg_full.rds")
+
+# archae MTT specific variables
+control_variables <- c("meal_ready_eat")
+deseq_archae <- runDESeq(ps_archae, dcut = 0.05, control_variables)
+tax <- data.frame(ps_archae@tax_table)
+df <- deseq_archae[[2]]
+df <- data.frame(cbind(df, tax[rownames(deseq_archae[[2]]), ]))
+ggplot(df, aes(x = log2FoldChange)) + geom_histogram() + facet_wrap(~Species) + geom_vline(xintercept = 0)
+
+
+
+#16s variables
+control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq")
+deseq_16s <- runDESeq(ps_16s, dcut = 0.05, control_variables)  
+tax <- data.frame(ps_16s@tax_table)
+df <- deseq_16s[[2]]
+df <- data.frame(cbind(df, tax[rownames(deseq_16s[[2]]), ]))
+
+
+
+
+alpha = 0.05
+deseq_mtg <- runDESeq(ps_mtg, dcut = alpha, control_variables)
+deseq_mtt <- runDESeq(ps_mtt, dcut = alpha, control_variables)
+deseq_metabol <- runDESeq(ps_metabol, dcut = alpha, control_variables)
+deseq_mag <- runDESeq(ps_mag, dcut = alpha, control_variables)
+
+
+saveRDS(deseq_mtg, "../results/differential_analysis/mtg/deseq_full.rds")
+saveRDS(deseq_mtt, "../results/differential_analysis/mtt/deseq_full.rds")
+saveRDS(deseq_metabol, "../results/differential_analysis/metabol/deseq_full.rds")
+
+```
+
+# Testing grounds
+```{r, fig.height = 5}
+deseq_contigs_mtg <- readRDS( "../results/differential_analysis/archae/mtg_full.rds")
+sig <- deseq_contigs_mtg[[2]]
+
+# Read in that lengthnorm
+ps_contigs_mtg_ln <- readRDS("../data/archae/ps_contigs_500bp_lengthnorm.rds")
+archae <- as.logical(ps_contigs_mtg_ln@tax_table[, 5] == "Archaea")
+ps_archae_mtg_ln <- prune_taxa(archae, ps_contigs_mtg_ln)
+ps_archae_mtg_ln <- prune_taxa(rowSums(ps_contigs_mtg_ln@otu_table) > 0, ps_contigs_mtg_ln)
+saveRDS(ps_archae_mtg_ln, "../data/archae/ps_contigs_archae_lengthnorm.rds")
+
+
+df <- ps_archae_mtg_ln@otu_table[rownames(sig)]
+tax <- data.frame(ps_archae_mtg_ln@tax_table)[rownames(sig), ]
+tax$lfc <- sig$log2FoldChange
+msmithii <- tax[tax$Species == "Methanobrevibacter smithii", ]
+sum(msmithii$lfc < 0)
+sum(msmithii$lfc > 0)
+
+df <- data.frame(cbind(sig, tax))
+ggplot(df, aes(x = log2FoldChange)) + geom_histogram() + facet_wrap(~Species) + geom_vline(xintercept = 0)
+ # That interesting, so let's look at how convincing each contig is
+
+df <- data.frame(ps_archae_mtg_ln@otu_table)[rownames(sig), ]
+pheatmap(df) # ,ax is 1.2 reads per contig for any given sample, 
+df$species <- data.frame(ps_archae_mtg_ln@tax_table)[rownames(sig), 'Species' ]
+
+msmithii <- df[df$species  == "Methanobrevibacter smithii", ]
+msmithii <- msmithii %>% select(-c("species"))
+msmithii <- data.frame(t(msmithii))
+msmithii$phenotype <- ps_archae_mtg_ln@sam_data$phenotype
+msmithii$host_name <- ps_archae_mtg_ln@sam_data$host_name
+msmithii_melt <- melt(msmithii, id.vars = c("phenotype", "host_name"))
+
+ggplot(msmithii_melt, aes(x = phenotype, y = value)) + geom_boxplot() + facet_wrap(vars(variable)) + scale_y_continuous(trans='log10') + geom_jitter(width = 0.1) + geom_text(aes(label = host_name), nudge_x = 0.2, nudge_y = 0.2, label.size = 1)
+
+msmithii <- df[df$species  == "Methanobrevibacter smithii", ]
+msmithii <- msmithii %>% select(-c("species"))
+msmithii <- data.frame(t(msmithii))
+aggregated <- rowSums(msmithii)
+df <- data.frame(count = aggregated, phenotype = ps_archae_mtg_ln@sam_data$phenotype, host_name = ps_archae_mtg_ln@sam_data$host_name)
+df$total_depth <- sample_sums(ps_archae_mtg)
+df <- df[df$count > 0, ]
+ggplot(df, aes(x = phenotype, y = count)) + geom_boxplot()  + geom_jitter(width = 0.1, aes(color = total_depth)) + geom_text(aes(label = host_name), nudge_x = 0.2, nudge_y = 0.2)
+
+tmp <- df[df$count > 0, ]
+tmp <- tmp[order(tmp$phenotype), ]
+
+
+
+
+agg <- function(ps, phy_level){
+  seqtab <- data.frame(ps@otu_table)
+  seqtab$phy_level <- data.frame(ps@tax_table)[, phy_level]
+  seqtab_agg <- aggregate(.~phy_level,data=seqtab,FUN=sum)
+  rownames(seqtab_agg) <- as.character(seqtab_agg$phy_level)
+  seqtab_agg <- seqtab_agg[ , 2: ncol(seqtab_agg)]
+  
+  ps_agg <- phyloseq(otu_table(seqtab_agg, taxa_are_rows = T), sample_data(ps@sam_data))
+  return(ps_agg)
+}
+
+plotAggArchae <- function(phy_level, control_variables, ps){
+  ps <- agg(ps, phy_level = phy_level)
+  #ps_archae_mtt_ln_agg <- agg(ps_archae_mtt_ln, phy_level = phy_level)
+  #ps_archae_mtt_agg <- agg(ps_archae_mtt, phy_level = phy_level)
+  #control_variables <- c("meal_ready_eat")
+  res <- runDESeq(ps, dcut = 0.05, control_variables)
+  sig <- res[[2]]
+  
+  df <- data.frame(sig)
+  df$lfc <- sig$log2FoldChange
+  View(df[order(df$lfc), ])
+  
+  toplot <- rownames(sig)
+  df <- as.data.frame(t(ps@otu_table))
+  df <- df[ , toplot, drop = F]
+  df$host_name <- ps@sam_data$host_name
+  df$phenotype <- ps@sam_data$phenotype
+  pvals <- sig$padj
+  
+  #library(reshape2)
+  df_melt <- melt(df, id.vars = c("phenotype", "host_name"))
+  return(df_melt)
+}
+ps_archae_mtt_ln <- readRDS("../data/archae/MTT/ps_contigs_500bp_lengthnorm.rds")
+
+```
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Species", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+```
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Genus", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+# plot using normalized by length norm
+```
+
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Family", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+```
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Order", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+```
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Class", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+```
+
+```{r}
+df_melt <- plotAggArchae(phy_level = "Phylum", control_variables = control_variables, ps = ps_archae_mtg)
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+
+```
+
+
+
+# Species aggregation
+```{r}
+
+plotAggArchae("Species")
+#ggplot(df_melt, aes(x = phenotype, y = value, fill = phenotype)) + geom_bar(stat = 'identity') + facet_wrap(vars(variable), scales = 'free')
+```
+
+# Genus aggregation
+```{r}
+plotAggArchae("Genus")
+```
+
+# Family aggregation
+```{r}
+plotAggArchae("Family")
+```
+
+# Order aggregation
+```{r}
+plotAggArchae("Order")
+```
+# Class aggregation
+```{r}
+plotAggArchae("Class")
+```
+
+# Phylum aggregation
+```{r}
+df_melt <- plotAggArchae("Phylum")
+p <- ggplot(df_melt, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + facet_wrap(vars(variable), scales = 'free') +  scale_y_continuous(trans='log10') + geom_jitter(width = 0.1)
+p
+``` 
+
+
+
+# Plot differential analysis MTG/MTT
+```{r}
+deseq_mtg <- readRDS("../results/differential_analysis/mtg/deseq_full.rds")[[2]]
+deseq_mtt <- readRDS("../results/differential_analysis/mtt/deseq_full.rds")[[2]]
+genes <- intersect(rownames(deseq_mtg), rownames(deseq_mtt))
+
+# MTG version
+toplot <- genes
+pvals <- deseq_mtg[toplot, 'padj']
+names(pvals) <- toplot
+
+df <- as.data.frame(t(ps_mtg@otu_table))
+df <- df[ , toplot, drop = F]
+df$phenotype <- ifelse(ps_mtg@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df, pvals, getGeneName = T, ncol = 1)
+ggsave("../results/differential_analysis/mtg/deseq_densities.png", width = 5, height = 5)
+ggsave("../results/differential_analysis/mtg/deseq_densities.pdf", width = 5, height = 5)
+
+toplot <- genes
+pvals <- deseq_mtt[toplot, 'padj']
+names(pvals) <- toplot
+
+df <- as.data.frame(t(ps_mtt@otu_table))
+df <- df[ , toplot, drop = F]
+df$phenotype <- ifelse(ps_mtt@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df, pvals, getGeneName = T)
+ggsave("../results/differential_analysis/mtt/deseq_densities.png", width = 5, height = 5)
+ggsave("../results/differential_analysis/mtt/deseq_densities.pdf", width = 5, height = 5)
+
+```
+
+# Plot differential analysis MBX
+```{r}
+deseq_metabol <- readRDS("../results/differential_analysis/metabol/deseq_full.rds")[[2]]
+toplot <- rownames(deseq_metabol)
+pvals <- deseq_metabol[toplot, 'padj']
+names(pvals) <- toplot
+
+df <- as.data.frame(t(ps_metabol@otu_table))
+df <- df[ , toplot, drop = F]
+df$phenotype <- ifelse(ps_metabol@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df, pvals, getGeneName = F, ncol = 2)
+ggsave("../results/differential_analysis/metabol/deseq_densities.png", width = 8)
+ggsave("../results/differential_analysis/metabol/deseq_densities.pdf", width = 8)
+
+```
+# Correlate with alpha diversity
+```{r}
+plotCorrelationAlphaDiversity(toplot = rownames(deseq_metabol), ps = ps_metabol, ncol = 2)
+ggsave("../results/differential_analysis/metabol/correlation_deseq_diversity.pdf", height = 8)
+
+plotCorrelationAlphaDiversity(toplot = genes, ps = ps_mtg, getGeneName = T)
+ggsave("../results/differential_analysis/mtg/correlation_deseq_diversity.pdf", width = 4, height = 5)
+ggsave("../results/differential_analysis/mtg/correlation_deseq_diversity.png", width = 4, height = 5)
+
+plotCorrelationAlphaDiversity(toplot = genes, ps = ps_mtt, getGeneName = T)
+ggsave("../results/differential_analysis/mtt/correlation_deseq_diversity.pdf", width = 4, height = 5)
+ggsave("../results/differential_analysis/mtt/correlation_deseq_diversity.png", width = 4, height = 5)
+
+```
+
+# Correlate with functional diversity
+```{r}
+plotCorrelationFunctionalDiversity(toplot = rownames(deseq_metabol), ps = ps_metabol, ncol = 2)
+ggsave("../results/differential_analysis/metabol/correlation_deseq_functional_diversity.pdf", height = 8)
+
+plotCorrelationFunctionalDiversity(toplot = genes, ps = ps_mtg, getGeneName = T)
+ggsave("../results/differential_analysis/mtg/correlation_deseq_functional_diversity.pdf", width = 4, height = 5)
+ggsave("../results/differential_analysis/mtg/correlation_deseq_functional_diversity.png", width = 4, height = 5)
+
+plotCorrelationFunctionalDiversity(toplot = genes, ps = ps_mtt, getGeneName = T)
+ggsave("../results/differential_analysis/mtt/correlation_deseq_functional_diversity.pdf", width = 4, height = 5)
+ggsave("../results/differential_analysis/mtt/correlation_deseq_functional_diversity.png", width = 4, height = 5)
+
+```
+
+# Correlate with stool frequency
+```{r}
+toplot <- rownames(deseq_metabol)
+plotCorrelationStoolFreq(toplot, ps = ps_metabol)
+ggsave("../results/differential_analysis/metabol/corr_stool.pdf", width = 6, height = 6)
+  
+toplot <- genes
+plotCorrelationStoolFreq(toplot, ps_mtg, getGeneName = T)
+ggsave("../results/differential_analysis/mtg/corr_stool.pdf", width = 6, height = 6)
+
+toplot <- genes
+plotCorrelationStoolFreq(toplot, ps_mtt, getGeneName = T)
+ggsave("../results/differential_analysis/mtt/corr_stool.pdf", width = 6, height = 4)
+```
+
+
+# correlate stool freq with alpha diversity
+```{r}
+
+diversity <- unlist(estimate_richness(ps_16s, measures = "shannon"))
+stool_freq <- as.numeric(unlist(ps_16s@sam_data$stool_freq)) 
+age <- as.numeric(ps_16s@sam_data$age)
+df <- data.frame(diversity = diversity, stool_freq = stool_freq, age = age)
+
+# Partial spearman controlling for age
+tmp <- PResiduals::partial_Spearman(formula("diversity | stool_freq ~ age"), df)
+pval <- tmp$TS$TB$pval
+r <- tmp$TS$TB$ts
+
+p <- ggplot(df, aes(x = stool_freq, y = diversity)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  theme_bw()+ theme(strip.background =element_rect(fill="white"))+
+  annotate("text", x = 0.5, y = 4.5, label = paste("Pval = ", round(pval, 3))) +
+  annotate("text", x = 0.5, y = 4.7, label = paste("R = ", round(r, 3)))+
+  ylab("Diversity") + xlab("Stool Frequency")
+p
+``````
+
+
+# Correlate with GI distress
+```{r}
+toplot <- rownames(deseq_metabol)
+plotCorrelationGIDistress(toplot, ps_metabol)
+ggsave("../results/differential_analysis/metabol/corr_GI.pdf", width = 5, height = 6)
+  
+toplot <-  genes
+plotCorrelationGIDistress(toplot, ps_mtg, getGeneName = T)
+ggsave("../results/differential_analysis/mtg/corr_GI.pdf", width = 5, height = 6)
+
+toplot <- genes
+plotCorrelationGIDistress(toplot, ps_mtt, getGeneName = T)
+ggsave("../results/differential_analysis/mtt/corr_GI.pdf", width = 5, height = 4)
+
+```
+
+
+
+
+
+
+# Write out ranked genes for gsea
+```{r}
+deseq_mtg <- readRDS("../results/differential_analysis/mtg/deseq_full.rds")
+deseq_mtt <- readRDS("../results/differential_analysis/mtt/deseq_full.rds")
+#to match gsea code, we need negative to mean more in the NT and positive to mean more in the ASD
+mtg_ranked <- data.frame(kegg_id = rownames(deseq_mtg[[1]]), score = -deseq_mtg[[1]]$log2FoldChange)
+
+mtt_ranked <- data.frame(kegg_id = rownames(deseq_mtt[[1]]), score = -deseq_mtt[[1]]$log2FoldChange)
+
+write.csv(mtg_ranked, "../results/gsea/mtg_ranked_deseq.csv", quote = F, row.names = F)
+write.csv(mtt_ranked, "../results/gsea/mtt_ranked_deseq.csv", quote = F, row.names = F)
+
+```
+
+# GSEA
+```{r}
+# go to python script gsea_prerank.ipynb to run
+```
+
+# Interpret gsea
+```{r}
+mtg_res <- read.csv("E:/Users/kitikomp/Documents/Lab/M3//results/gsea/mtg_gsea_deseqranked_1000.csv")
+mtt_res <- read.csv("E:/Users/kitikomp/Documents/Lab/M3//results/gsea/mtt_gsea_deseqranked_1000.csv")
+rownames(mtg_res) <- mtg_res$Term
+rownames(mtt_res) <- mtt_res$Term
+
+mtg_res <- mtg_res[mtg_res$fdr < .05, ]
+mtt_res <- mtt_res[mtt_res$fdr < .05, ]
+paths <- intersect(mtg_res$Term, mtt_res$Term)
+
+
+full_names <- lapply(mtg_res$Term, function(x){ return(keggGet(x)[[1]]$NAME)})
+mtg_res$full_name <- unlist(full_names)
+full_names <- lapply(mtt_res$Term, function(x){ return(keggGet(x)[[1]]$NAME)})
+mtt_res$full_name <- unlist(full_names)
+
+print(mtg_res[paths, ])
+print(mtt_res[paths, ])
+
+saveRDS(mtg_res, "../results/gsea/mtg_gsea_overlap.rds")
+saveRDS(mtt_res, "../results/gsea/mtt_gsea_overlap.rds")
+```
+
+# Correlate pathway alpha diversity
+```{r}
+# Do any of the genes overlap between pathways? No
+#genes <- strsplit(mtg_res$genes, ";")
+#sort(table(unlist(genes)))
+
+#genes <- strsplit(mtt_res$genes, ";")
+#sort(table(unlist(genes)))
+
+p_pathwaymtg_alpha16s <- pathwayCorrelateDiversity(mtg_res[paths, ], ps_mtg)
+ggsave("../results/gsea/pathway_correlate_diversity_mtg.pdf")
+
+p_pathwaymtt_alpha16s <- pathwayCorrelateDiversity(mtt_res[paths, ], ps_mtt)
+ggsave("../results/gsea/pathway_correlate_diversity_mtt.pdf")
+```
+
+# Correlate pathway functional diversity
+```{r}
+p_pathwaymtg_diversitymtg <- pathwayCorrelateFunctionalDiversity(mtg_res[paths, ], ps_mtg)
+ggsave("../results/gsea/pathway_correlate_functional_diversity_mtg.pdf")
+
+p_pathwaymtt_diversitymtt <- pathwayCorrelateFunctionalDiversity(mtt_res[paths, ], ps_mtt)
+ggsave("../results/gsea/pathway_correlate_functional_diversity_mtt.pdf")
+```
+
+
+# Correlate pathway Stool Frequency
+```{r}
+p_pathwaymtg_stoolfreq <- pathwayCorrelateStoolFreq(mtg_res[paths, ], ps_mtg)
+ggsave("../results/gsea/pathway_correlate_stoolfreq_mtg.pdf")
+
+p_pathwaymtt_stoolfreq <- pathwayCorrelateStoolFreq(mtt_res[paths, ], ps_mtt)
+ggsave("../results/gsea/pathway_correlate_stoolfreq_mtt.pdf")
+```
+
+# Plot pathway aggregate abundance
+```{r}
+res <- mtg_res[paths, ]
+agg_counts <- lapply(res$Term, function(path_id){
+    genes <- strsplit(res[path_id, "ledge_genes"], ";")[[1]]
+    agg <- colSums(ps@otu_table[genes, ])
+    return(agg)
+  })
+
+df <- data.frame(do.call(cbind, agg_counts))
+colnames(df) <- sapply(paths, getFullGeneName)
+df$phenotype <- ifelse(ps_mtg@sam_data[rownames(df), "phenotype"] == "A", 1, 0)
+plotDensities(df, pvals = rep(NA, nrow(df)), getGeneName = F)
+
+```
+
+# Stitch correlation plots
+```{r, fig.height = 12, fig.width = 8}
+p_pathwaymtg_alpha16s <- p_pathwaymtg_alpha16s + ggtitle("Pathway Abundance MTG vs. \n Alpha Diversity 16S (Shannon)")
+p_pathwaymtt_alpha16s <- p_pathwaymtt_alpha16s + ggtitle("Pathway Abundance MTT vs. \n Alpha Diversity 16S (Shannon)")
+p_pathwaymtg_stoolfreq <- p_pathwaymtg_stoolfreq + ggtitle("Pathway Abundance MTG vs. \n Stool Frequency (daily)")
+p_pathwaymtt_stoolfreq <- p_pathwaymtt_stoolfreq + ggtitle("Pathway Abundance MTT vs. \n Stool Frequency (daily)")
+p_pathwaymtg_diversitymtg <- p_pathwaymtg_diversitymtg + ggtitle("Pathway Abundance MTG vs. \n Alpha Diversity MAGS")
+p_pathwaymtt_diversitymtt <- p_pathwaymtt_diversitymtt + ggtitle("Pathway Abundance MTT vs. \n Alpha Diversity MAGS")
+
+p <- ggarrange(p_pathwaymtg_alpha16s, p_pathwaymtt_alpha16s, p_pathwaymtg_stoolfreq, p_pathwaymtt_stoolfreq, ncol = 2, nrow = 2)
+p
+ggsave("../results/gsea/supplementary_file_pathway_correlations.pdf", height = 8, width = 8)
+```
+
+
+# Visualize gsea pathways
+```{r}
+#setwd("C:/Users/kitikomp/Documents/Lab/M3/results/gsea")
+setwd("E:/Users/kitikomp/Documents/Lab/M3/results/gsea")
+library(pathview)
+
+plotPathway <- function(path){
+  gene_list <- names(keggGet(path)[[1]]$ORTHOLOGY)
+  genes <- gene_list
+  #effect_size <- rep(0, length(gene_list))
+  #names(effect_size) <- gene_list
+  
+  #differential abundance mtg
+  deseq_mtg <- readRDS("E:/Users/kitikomp/Documents/Lab/M3//differential_analysis/mtg/deseq_full.rds")[[1]]
+  effect_size_mtg <- deseq_mtg[genes, "log2FoldChange"]
+  names(effect_size_mtg) <- genes
+  #effect_size_mtg[deseq_mtg[genes, "pvalue"] > .05] = 0
+  
+  #differential abundance mtt
+  deseq_mtt <- readRDS("E:/Users/kitikomp/Documents/Lab/M3//differential_analysis/mtt/deseq_full.rds")[[1]]
+  effect_size_mtt <- deseq_mtt[genes, "log2FoldChange"]
+  names(effect_size_mtt) <- genes
+  #effect_size_mtt[deseq_mtt[genes, "pvalue"] > .05] = 0
+  
+  df <- data.frame(cbind(effect_size_mtg, effect_size_mtt))
+  
+  pv <- pathview(gene.data = df, pathway.id = path,
+                 species = "ko",
+                 low = "white", mid = "#F0FFD7", high = td_color,
+                 limit = list("gene" = c(round(min(effect_size_mtg, effect_size_mtt, na.rm = T)), round(max(effect_size_mtg, effect_size_mtt, na.rm = T)))),
+                 res = 1000)
+  head(pv$plot.data.gene)
+}
+
+for(path in mtg_res$Term){
+  plotPathway(path)
+}
+
+```
+
+
+# Visualize gsea pathway other
+```{r}
+setwd("C:/Users/kitikomp/Documents/Lab/M3/results/gsea")
+
+library(pathview)
+# Inspired by Compound N,N,N trimethyl alanylproline betaine (TMAP) increased in ASD
+path = "ko00061"
+gene_list <- names(keggGet(path)[[1]]$ORTHOLOGY)
+genes <- gene_list
+metabolite_list <- names(keggGet(path)[[1]]$COMPOUND)
+#effect_size <- rep(0, length(gene_list))
+#names(effect_size) <- gene_list
+
+# differential abundance mtg
+deseq_mtg <- readRDS("../results/differential_analysis/mtg/deseq_full.rds")[[1]]
+effect_size_mtg <- deseq_mtg[genes, "log2FoldChange"]
+names(effect_size_mtg) <- genes
+
+# differential abundance mtt
+deseq_mtt <- readRDS("../results/differential_analysis/mtt/deseq_full.rds")[[1]]
+effect_size_mtt <- deseq_mtt[genes, "log2FoldChange"]
+names(effect_size_mtt) <- genes
+
+# Differential abundance metabol
+deseq_metabol <- readRDS("../results/differential_analysis/metabol/deseq_full.rds")[[1]]
+deseq_metabol <- as.data.frame(deseq_metabol)
+ps_metabol <- readRDS( "../data/mbx/ps_tmm_nooutliers_fixedmapping.rds")
+compound_ids <- data.frame(ps_metabol@tax_table)[rownames(deseq_metabol), "KEGG"]
+deseq_metabol$compound_ids <- compound_ids
+deseq_metabol <- deseq_metabol[match(metabolite_list, deseq_metabol$compound_ids), ]
+deseq_metabol <- deseq_metabol[!grepl("NA", rownames(deseq_metabol)), ]
+rownames(deseq_metabol) <- deseq_metabol$compound_ids
+
+effect_size_metabol <- deseq_metabol[metabolite_list, "log2FoldChange"]
+names(effect_size_metabol) <- metabolite_list
+
+
+
+df <- data.frame(cbind(effect_size_mtg, effect_size_mtt))
+
+pv <- pathview(gene.data = df, cpd.data = effect_size_metabol, pathway.id = path,
+               species = "ko",
+               low = "red", mid = "#F0FFD7", high = td_color,
+               limit = list("gene" = c(round(min(effect_size_mtg, effect_size_mtt, na.rm = T), 2), round(max(effect_size_mtg, effect_size_mtt, na.rm = T), 2))),
+               res = 1000)
+head(pv$plot.data.gene)
+
+```
+
+# Plot correlation
+```{r}
+plotCorrelationAgeCorrected <- function(df, ind_vars, dep_var, getGeneName =F){
+  df <- reshape2::melt(df, id = c('phenotype', dep_var, "age"))
+  colnames(df) <- c("phenotype", "dep_var", "age", "variable", "value")
+  
+  pvals <- sapply(ind_vars, function(x){
+    tmp_use <- df[df$variable == x, ]
+    #f <- formula(paste("dep_var | variable ~ age"))
+    res <- PResiduals::partial_Spearman(formula("dep_var | value ~ age"), tmp_use)
+    pval <- res$TS$TB$pval
+    return(pval)
+  })
+  names(pvals) <- ind_vars
+  labels <- c(round(pvals[ind_vars], 3))
+  if(getGeneName){
+    kegg_res <- keggGet(names(labels))
+    full_names <- unlist(lapply(kegg_res, function(x) return(x$NAME)))
+    full_names <- sub("\\[.*?\\]", "", full_names)
+    full_names <- gsub ("\\/", "\n", full_names)
+    full_names <- gsub (",", "\n", full_names)
+    
+    names(full_names) <- names(labels)
+    df$variable <- paste(df$variable, "\n", full_names[df$variable], "\n", " p = ", labels[df$variable])
+  }else{
+    df$variable <- paste(df$variable, "\n", " p = ", labels[df$variable])
+  }
+  
+  p <- ggplot(df, aes(x = log(value), y = dep_var)) +
+    geom_point() +
+    geom_smooth(method = "lm")+
+    facet_wrap(vars(variable), ncol = 2, scale = "free") +
+    theme_bw()+ theme(strip.background =element_rect(fill="white")) +
+    xlab ("log(pathway abundance)")
+  return(p)
+}
+```
+
+# Correlations of genes with Mara
+```{r}
+deseq_mtg <- readRDS("../results/differential_analysis/mtg/deseq_full.rds")[[2]]
+deseq_mtt <- readRDS("../results/differential_analysis/mtt/deseq_full.rds")[[2]]
+genes <- intersect(rownames(deseq_mtg), rownames(deseq_mtt))
+genes
+
+df <- data.frame(cbind(t(ps_mtg@otu_table[genes, ])))
+df$age <- as.numeric(ps_mtg@sam_data$age)
+df$mara <- as.numeric(ps_mtg@sam_data$MARA)
+df$phenotype <- ps_mtg@sam_data$phenotype
+colnames(df) <- c(genes, "age", "mara", "phenotype")
+df <- df[df$phenotype == "A", ]
+
+plotCorrelationAgeCorrected(df, ind_vars = genes, dep_var = "mara")
+
+
+df <- data.frame(cbind(t(ps_mtt@otu_table[genes, ])))
+df$age <- as.numeric(ps_mtt@sam_data$age)
+df$mara <- as.numeric(ps_mtt@sam_data$MARA)
+df$phenotype <- ps_mtt@sam_data$phenotype
+colnames(df) <- c(genes, "age", "mara", "phenotype")
+df <- df[df$phenotype == "A", ]
+
+plotCorrelationAgeCorrected(df, ind_vars = genes, dep_var = "mara")
+
+```
+
+# Correlations of metabolites with Mara
+```{r}
+deseq_metabol <- readRDS("../results/differential_analysis/metabol/deseq_full.rds")[[2]]
+metabolites <- rownames(deseq_metabol)
+
+df <- data.frame(cbind(t(ps_metabol@otu_table[metabolites, ])))
+df$age <- as.numeric(ps_metabol@sam_data$age)
+df$mara <- as.numeric(ps_metabol@sam_data$MARA)
+df$phenotype <- ps_metabol@sam_data$phenotype
+colnames(df) <- c(metabolites, "age", "mara", "phenotype")
+df <- df[df$phenotype == "A", ]
+
+plotCorrelationAgeCorrected(df, ind_vars = metabolites, dep_var = "mara")
+
+```
+
+# Correlations of pathway abundance with Mara
+```{r}
+mtg_res <- readRDS("../results/gsea/mtg_gsea_overlap.rds")
+mtt_res <- readRDS("../results/gsea/mtt_gsea_overlap.rds")
+paths <- intersect(rownames(mtg_res), rownames(mtt_res))
+
+agg_counts <- lapply(mtg_res$Term, function(path_id){
+  genes <- strsplit(mtg_res[path_id, "ledge_genes"], ";")[[1]]
+  agg <- colSums(ps_mtg@otu_table[genes, ])
+  return(agg)
+})
+
+df <- data.frame(do.call(cbind, agg_counts))
+df$age <- as.numeric(ps_mtg@sam_data$age)
+df$mara <- as.numeric(ps_mtg@sam_data$MARA)
+df$phenotype <- ps_mtg@sam_data$phenotype
+colnames(df) <- c(mtg_res$Term, "age", "mara", "phenotype")
+df <- df[df$phenotype == "A", ]
+
+plotCorrelationAgeCorrected(df, ind_vars = paths, dep_var = "mara")
+
+
+agg_counts <- lapply(mtt_res$Term, function(path_id){
+  genes <- strsplit(mtt_res[path_id, "ledge_genes"], ";")[[1]]
+  agg <- colSums(ps_mtt@otu_table[genes, ])
+  return(agg)
+})
+
+df <- data.frame(do.call(cbind, agg_counts))
+df$age <- as.numeric(ps_mtt@sam_data$age)
+df$mara <- as.numeric(ps_mtt@sam_data$MARA)
+df$phenotype <- ps_mtt@sam_data$phenotype
+colnames(df) <- c(mtt_res$Term, "age", "mara", "phenotype")
+df <- df[df$phenotype == "A", ]
+
+plotCorrelationAgeCorrected(df, ind_vars = paths, dep_var = "mara")
+
+
+```
+
+
+# Correlations of archae with metabolites
+```{r, fig.height=12}
+library(data.table)
+
+archae_counts <- colSums(ps_archae@otu_table)
+
+#normalize by total reads in each metagenome
+total_counts <- sample_sums(ps_mtg)
+samples <- intersect(names(archae_counts), names(total_counts))
+archae_counts <- archae_counts[samples] / total_counts[samples]
+archae_counts <- archae_counts[archae_counts< .002]
+
+df <- data.frame(t(as.matrix(ps_metabol@otu_table)))
+taxa <- colnames(df)
+df <- df[, taxa]
+df$age <- as.numeric(ps_metabol@sam_data$age)
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$stool_freq <- as.numeric(ps_metabol@sam_data$stool_freq)
+colnames(df) <- c(taxa, "age", "phenotype", "stool_freq")
+
+samples <- intersect(rownames(df), names(archae_counts))
+archae_counts <- archae_counts[samples]
+df <- df[samples, ]
+df$archae_counts <- archae_counts
+
+#spearman correlations
+ind_vars <- taxa
+dep_var <- "archae_counts"
+df_tmp <- reshape2::melt(df, id = c('phenotype', dep_var, "age"))
+colnames(df_tmp) <- c("phenotype", "dep_var", "age", "variable", "value")
+
+pvals <- sapply(ind_vars, function(x){
+  tmp_use <- df_tmp[df_tmp$variable == x, ]
+  #f <- formula(paste("dep_var | variable ~ age"))
+  res <- PResiduals::partial_Spearman(formula("dep_var | value ~ age"), tmp_use)
+  pval <- res$TS$TB$pval
+  return(pval)
+})
+names(pvals) <- ind_vars
+p_adj <- p.adjust(pvals, method = "fdr")
+sort(p_adj[p_adj < .05])
+print(sum(p_adj < .05))
+
+ind_vars <- names(sort(p_adj[p_adj < .05])[1:10])
+df_plot <- df[ , c(ind_vars, "phenotype", "age", "archae_counts", "stool_freq")]
+plotCorrelationAgeCorrected(df_plot, ind_vars = ind_vars, dep_var = "archae_counts", getGeneName=F)
+
+
+
+cor.test(df_plot$stool_freq, df_plot$archae_counts, method = "spearman")
+plot(df_plot$stool_freq, df_plot$archae_counts)
+```
+
+# Using complete kraken phyloseq
+```{r, fig.height = 2}
+library(ggplot2)
+#ps <- readRDS("../ps_contigs_500bp.rds")
+archae <- as.logical(ps_contigs@tax_table[, 5] == "Archaea")
+archae_counts <- colSums(ps_contigs@otu_table[archae, ], na.rm = T)
+total_counts <- colSums(ps_contigs@otu_table, na.rm = T)
+df <- data.frame(percent_reads_archae = archae_counts / total_counts* 100, phenotype = ps_contigs@sam_data$phenotype)
+ggplot(df, aes(y = percent_reads_archae , fill = phenotype)) +
+geom_histogram() + coord_flip() + theme_bw() + facet_wrap(vars(phenotype))
+
+# This is not all the samples, but still, archae are a VERY small percent of what we captured
+# Why could this be? We did do bead beating
+```
+
+
+
+
+# Medium chain fatty acids differential abundance
+```{r, fig.width = 15, fig.height= 15}
+taxa_names(ps_metabol)[grep('oate', as.character(taxa_names(ps_metabol)))]
+
+#Ratio of EPA to DPA
+keep <- c("docosapentaenoate (DPA; 22:5n3)", "eicosapentaenoate (EPA; 20:5n3)")
+
+
+#MFCA
+mcfa_id <- c(paste("C", seq(6,12), sep = ""), paste("\\(", seq(6, 12), ":", sep = ""))
+mcfa <- sapply(mcfa_id, function(x){
+  return(taxa_names(ps_metabol)[grep(x, taxa_names(ps_metabol))])
+})
+
+ps_mcfa <- prune_taxa(unlist(mcfa), ps_metabol)
+df <- data.frame(t(ps_mcfa@otu_table))
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$host_name <- ps_metabol@sam_data$host_name
+df$mara <- as.numeric(ps_metabol@sam_data$MARA)
+df_melt <- melt(df, id.vars = c("phenotype", "host_name", "mara"))
+df_melt <- df_melt %>% group_by(variable) %>% summarize(norm = (value - mean(value)) / sd(value), 
+                                                        phenotype = phenotype,
+                                                        host_name = host_name, 
+                                                        mara = mara)
+#df_melt <- df_melt %>% group_by(host_name, variable, phenotype) %>% summarize(median = median(value), mara = mara)
+
+#df_melt <- df_melt[df_melt$median > 0, ]
+
+#separate
+ggplot(df_melt, aes(x = phenotype, y = norm, fill = phenotype)) +
+  geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1) +
+  facet_wrap(~variable) + stat_compare_means()
+
+# aggregate
+ggplot(df_melt, aes(x = phenotype, y = norm, fill = phenotype, label = paste(host_name, variable))) +
+  geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1) +
+  stat_compare_means(method = "wilcox.test") + geom_text(check_overlap = T)
+
+# next level aggregate
+df_agg <- df_melt %>% group_by(host_name, phenotype) %>% summarize(sum = sum(norm)) 
+ggplot(df_agg, aes(x = phenotype, y = sum, fill = phenotype, label = paste(host_name))) +
+  geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1) +
+  stat_compare_means(method = "wilcox.test") + geom_text(check_overlap = T)
+
+
+# Correlation w/ mara, not significant
+df_melt_aut <- df_melt[df_melt$phenotype == "A", ]
+
+ggplot(df_melt_aut, aes(mara, norm, label = paste(host_name, variable))) + geom_point() + geom_text(check_overlap = T)
+cor.test(df_melt_aut$mara, df_melt_aut$norm, method = "spearman")
+
+```
+
+
+# Select inflammation samples
+```{r}
+metadata <- readRDS("../data/16s/all_meta_data.rds")
+
+df <- data.frame(
+host_name = metadata$Host.Name,
+stool_freq = metadata$Stool.frequency..Biospecimen.,
+functional_bowel = metadata$Functional.bowel.finding..Biospecimen.,
+diarrhea = metadata$Diarrhea..Biospecimen.,
+constipation = metadata$Constipation..Biospecimen.,
+this_week = metadata$GI.issues.this.week..M3...Biospecimen.,
+two_weeks = metadata$GI.issues.two.weeks.ago..M3...Biospecimen.,
+month = metadata$GI.issues.one.month.ago..M3...Biospecimen.,
+two_months = metadata$GI.issues.two.months.ago..M3...Biospecimen., 
+three_months = metadata$GI.issues.three.months.ago..M3...Biospecimen.
+
+)
+
+View(df[order(df$metadata.Stool.frequency..Biospecimen., decreasing = T),  ])
+
+inflammation <- df[df$this_week & 
+     df$functional_bowel == "Tends to have diarrhea" &
+     df$stool_freq %in% c(3, 4, "5 or more"), ]
+print(dim(inflammation))
+
+library(pheatmap)
+tmp <- inflammation[!duplicated(inflammation$host_name), ]
+rownames(tmp) <- tmp$host_name
+tmp <- tmp[, !(colnames(tmp) %in% c("host_name"))]
+tmp$stool_freq[tmp$stool_freq == "5 or more"] = 5
+tmp$stool_freq <- as.numeric(tmp$stool_freq)
+tmp$stool_freq <- tmp$stool_freq > 2
+tmp$functional_bowel <- ifelse(tmp$functional_bowel == "Tends to have diarrhea",1,0)
+
+tmp <- tmp * 1
+colnames(tmp)[1] <- "Stool freq >= 3 per day"
+colnames(tmp)[2] <- "Tends to have diarrhea"
+colnames(tmp)[3] <- "This sample is from diarrhea"
+colnames(tmp)[4] <- "This sample is from constipation"
+colnames(tmp)[5] <- "GI issues this week"
+colnames(tmp)[6] <- "GI issues last two weeks"
+colnames(tmp)[7] <- "GI issues last month"
+colnames(tmp[8]) <- "GI issues last two months"
+colnames(tmp[9]) <- "GI issues last three months"
+pheatmap(tmp, cluster_rows = F, cluster_cols = F, fontsize = 14)
+```
+# Select non-inflammation samples
+```{r}
+df <- data.frame(
+host_name = metadata$Host.Name,
+stool_freq = metadata$Stool.frequency..Biospecimen.,
+functional_bowel = metadata$Functional.bowel.finding..Biospecimen.,
+diarrhea = metadata$Diarrhea..Biospecimen.,
+constipation = metadata$Constipation..Biospecimen.,
+this_week = metadata$GI.issues.this.week..M3...Biospecimen.,
+two_weeks = metadata$GI.issues.two.weeks.ago..M3...Biospecimen.,
+month = metadata$GI.issues.one.month.ago..M3...Biospecimen.,
+two_months = metadata$GI.issues.two.months.ago..M3...Biospecimen., 
+three_months = metadata$GI.issues.three.months.ago..M3...Biospecimen.,
+vegetable = metadata$Vegetable..consumption.frequency...Biospecimen.,
+vegetable_freq = metadata$Vegetable..consumption.frequency...longitudinal...Biospecimen.
+)
+
+
+no_inflammation <-  df[!df$this_week & !df$two_weeks & !df$month & df$two_months&
+     df$functional_bowel == "Tends to have normal bowel function" &
+     df$stool_freq %in% c(1,2, 3) & !df$diarrhea & !df$constipation&
+       df$vegetable == "Daily" & df$vegetable_freq == "7-10 meals per week" , ]
+print(dim(no_inflammation))
+
+
+no_inflammation
+
+# Stool with high 5D
+sample_names(ps_metabol)[ps_metabol@otu_table["5-dodecenoate (12:1n7)", ] > 10]
+hist(as.numeric(ps_metabol@otu_table["5-dodecenoate (12:1n7)", ]), breaks = 30)
+#"M3_041_P1_N_V1"
+
+```
+# Mock data
+```{r}
+inflammation <- c()
+
+```
+
+
+# 5D associated with GI distress
+```{r}
+d <- as.numeric(ps_metabol@otu_table["5-dodecenoate (12:1n7)" , ])
+gi_distress <- as.numeric(as.logical(ps_metabol@sam_data$GI_issues_this_week))
+mara <- as.numeric(ps_metabol@sam_data$MARA)
+fat_oil <- as.numeric(ps_metabol@sam_data$fat_oil_freq)
+stool_freq <- as.numeric(ps_metabol@sam_data$stool_freq)
+olive_oil <- as.numeric(ps_metabol@sam_data$olive_oil)
+meal_home_prep <- as.numeric(ps_metabol@sam_data$meal_home_prep)
+father_age <- as.numeric(ps_metabol@sam_data$father_age)
+vegetable_freq <- as.numeric(ps_metabol@sam_data$vegetable_freq)
+vegetable <- as.numeric(ps_metabol@sam_data$vegetable)
+fruit_freq <- as.numeric(ps_metabol@sam_data$fruit_freq)
+fruit <- as.numeric(ps_metabol@sam_data$fruit)
+
+# Strongly correlates with vegetable and vegetable_freq, and nothing else
+cor.test(d, vegetable, method = "spearman")
+plot(d, vegetable_freq)
+plot(d, vegetable)
+```
+# 5D and sex
+```{r}
+
+df<- data.frame(d = d, sex = ps_metabol@sam_data$sex)
+df$sex[df$sex == 1] = "F"
+df$sex[df$sex  == 0 ] = "M"
+ggplot(df, aes(x = sex, y = d, fill = sex)) + geom_boxplot() + geom_jitter(width = 0.2) + stat_compare_means() + scale_y_log10() +theme_bw()
+```
+
+
+
+# Stop here
+
+
+ Density plots of differentially abundant metabolites, Wald test
+```{r}
+#wald test
+df <- as.data.frame(t(ps_metabol@otu_table))
+df$phenotype <- ifelse(ps_metabol@sam_data$phenotype == "A", 1, 0)
+colnames(df) <- gsub("-", ".", colnames(df))
+colnames(df) <- gsub(",", ".", colnames(df))
+colnames(df) <- gsub("\\(", ".", colnames(df))
+colnames(df) <- gsub("\\)", ".", colnames(df))
+colnames(df) <- gsub(" ", ".", colnames(df))
+colnames(df) <- gsub("\\*", ".", colnames(df))
+colnames(df) <- gsub("\\^", ".", colnames(df))
+colnames(df) <- gsub("\\+", ".", colnames(df))
+colnames(df) <- gsub("\\/", ".", colnames(df))
+colnames(df) <- gsub("\\[", ".", colnames(df))
+colnames(df) <- gsub("\\:", ".", colnames(df))
+colnames(df) <- gsub("\\;", ".", colnames(df))
+colnames(df) <- gsub("\\]", ".", colnames(df))
+
+colnames(df) <- gsub('[[:digit:]]+', '', colnames(df))
+pvals <- sapply(colnames(df), function(x){
+  f <- formula(paste("phenotype ~ ", x))
+  line <- glm(f, data = df, family = "binomial")
+  res <- wald.test(b = coef(line), Sigma = vcov(line), Terms = 1)
+  pval <- res$result$chi2[3]
+  return(pval)
+})
+
+sum(pvals < .05)
+metabolites_toplot <- taxa_names(ps_metabol)[which(pvals < .1)]
+```
+
+ Plot differentially abundant metabolites
+```{r,  fig.height = 8, fig.width = 4}
+
+plotDensities <- function(df, ncols = 1){
+  tmp <- melt(df, id = "phenotype")
+  tmp$phenotype <- ifelse(tmp$phenotype == 1, "ASD", "TD")
+  tmp_td <- tmp[tmp$phenotype == "TD", ]
+  medians<- tmp %>% group_by(variable) %>% summarize(median = median(value))
+  medians <- as.data.frame(medians)
+  rownames(medians) <- medians$variable
+  tmp$td_median <- medians[tmp$variable, 'median']
+  
+  
+  ggplot(data = tmp, aes(y = log2(value/td_median), fill = phenotype), colour = "grey") + geom_histogram(bins = 50) + facet_grid(vars(variable)) + coord_flip() + geom_hline(yintercept = 0, colour = "blue")
+  
+  p <- ggplot(data = tmp, aes(y = log2(value/td_median), fill = phenotype), colour = "grey") +
+    geom_density( alpha = 0.5) +
+    facet_wrap(vars(variable), strip.position = "bottom", ncol = ncols) +
+    coord_flip() +
+    geom_hline(yintercept = 0, colour = "blue") +
+    theme_bw() + theme(strip.background =element_rect(fill="white"))+
+    scale_fill_manual(values = list("ASD" = asd_color, "TD" = td_color))+
+    labs(y = "log_10(abundance relative to TD median)", x = "Density")
+  return(p)
+}
+```
+
+ Plot metabolites as determined by wald test
+```{r}
+
+df <- as.data.frame(t(ps_metabol@otu_table))
+df <- df[ , metabolites_toplot]
+df$phenotype <- ifelse(ps_metabol@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df)
+ggsave("../results/differential_analysis/metabolite_density_plots.pdf", height = 8, width = 4)
+
+```
+
+ Correlation between those molecular markers and MARA score
+```{r, fig.width=4, fig.height = 8}
+df <- as.data.frame(t(ps_metabol@otu_table))
+df <- df[ , metabolites_toplot]
+df$phenotype <- ifelse(ps_metabol@sam_data$phenotype == "A", 1, 0)
+df$mara <- as.numeric(ps_metabol@sam_data$MARA)
+df <- df[df$phenotype == 1, ]
+
+tmp <- melt(df, id = c("phenotype", "mara"))
+tmp$mara <- as.numeric(tmp$mara)
+tmp$td_median <- medians[tmp$variable, 'median']
+
+ggplot(tmp, aes(x = log(value/td_median), y = mara)) + geom_point() + facet_wrap(vars(variable), ncol = 1) +
+  geom_smooth(method = "lm")+
+  stat_regline_equation(label.y = 7, label.x = 0, aes(label = ..rr.label..))+
+  theme_bw()+ theme(strip.background =element_rect(fill="white")) + ylim(c(-10, 8))
+```
+
+ Plot fatty acids
+```{r, fig.width = 8, fig.height = 7}
+pattern = 'oleic acid'
+sum(grepl(pattern, taxa_names(ps_metabol)))
+metabolites_toplot <- taxa_names(ps_metabol)[grepl(pattern, taxa_names(ps_metabol))]
+df <- as.data.frame(t(ps_metabol@otu_table))
+df <- df[ , metabolites_toplot]
+df$phenotype <- ifelse(ps_metabol@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df, ncols = 3)
+p
+```
+
+ Plot genes with low p values from wald test
+```{r}
+df <- as.data.frame(t(ps_mtg@otu_table))
+df$phenotype <- ifelse(ps_mtg@sam_data$phenotype == "A", 1, 0)
+
+pvals <- sapply(colnames(df), function(x){
+  f <- formula(paste("phenotype ~ ", x))
+  line <- glm(f, data = df, family = "binomial")
+  res <- wald.test(b = coef(line), Sigma = vcov(line), Terms = 1)
+  pval <- res$result$chi2[3]
+  return(pval)
+})
+
+sum(pvals < .02)
+metabolites_toplot <- taxa_names(ps_mtg)[which(pvals < .01)]
+
+df <- as.data.frame(t(ps_mtg@otu_table))
+df <- df[ , metabolites_toplot]
+df$phenotype <- ifelse(ps_mtg@sam_data$phenotype == "A", 1, 0)
+p <- plotDensities(df, ncols = 3)
+p
+
+```
+
+
+ Functional diversity correlated with MARA score
+```{r}
+ps <- ps_mtg
+ps <- prune_samples(ps@sam_data$phenotype == "A", ps)
+diversity <- estimate_richness(ps, measures = "shannon")
+df <- data.frame(diversity = diversity, mara = ps@sam_data$MARA)
+
+cor.test(df$Shannon, df$mara, method = "spearman")
+
+p <- ggplot(df, aes(x = Shannon, y = mara)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  theme_bw()+ theme(strip.background =element_rect(fill="white"))
+p
+```
+
+ Is there a correlation between K20265 (glutamate:GABA antiporter) and anxiety? No
+```{r}
+getwd()
+
+ps <- readRDS("../data/mtg/PS_biocyc_MTG_age_filtered.rds")
+anxiety <- ps@sam_data$Recent.anxiety..caretaker.reported...Biospecimen.
+imaginary_play <- ps@sam_data$Plays.imaginatively.with.others..Biospecimen.
+group_play <- ps@sam_data$Plays.in.a.group.with.others..Biospecimen.
+eye_contact <- ps@sam_data$Eye.contact.finding..Biospecimen.
+
+
+anxiety[anxiety == "No elevated anxiety"] = 0
+anxiety[anxiety == "Somewhat elevated anxiety"] = 1
+anxiety[anxiety == "Elevated anxiety"] = 2
+anxiety <- as.numeric(anxiety)
+names(anxiety) <- ps@sam_data$Biospecimen.Name
+
+imaginary_play[imaginary_play == "Never"] = 0
+imaginary_play[imaginary_play == "Rarely"] = 1
+imaginary_play[imaginary_play == "Sometimes"] = 2
+imaginary_play <- as.numeric(imaginary_play)
+names(imaginary_play) <- ps@sam_data$Biospecimen.Name
+
+group_play[group_play == "Never"] = 0
+group_play[group_play == "Rarely"] = 1
+group_play[group_play == "Sometimes"] = 2
+group_play <- as.numeric(group_play)
+names(group_play) <- ps@sam_data$Biospecimen.Name
+
+eye_contact[eye_contact == "Little or no eye contact"]=0
+eye_contact[eye_contact == "Some eye contact"]=1
+eye_contact[eye_contact == "Consistent eye contact"]=2
+eye_contact <- as.numeric(eye_contact)
+names(eye_contact) <- ps@sam_data$Biospecimen.Name
+
+#transporter and carboxythyl GABA related to anxiety
+feature <- ps_mtg@otu_table["K20265", ps_mtg@sam_data$phenotype == "A"]
+feature <- ps_metabol@otu_table[32, ps_metabol@sam_data$phenotype == "A"] 
+plot(as.numeric(feature), anxiety[colnames(feature)])
+spearman.test(as.numeric(feature), anxiety[colnames(feature)])
+
+
+#transporter and carboxythyl GABA related to anxiety
+feature <- ps_mtg@otu_table["K20265", ps_mtg@sam_data$phenotype == "A"]
+feature <- ps_metabol@otu_table[32,  ps_metabol@sam_data$phenotype == "A"] 
+plot(as.numeric(feature), imaginary_play[colnames(feature)])
+spearman.test(as.numeric(feature), imaginary_play[colnames(feature)])
+
+#transporter and carboxythyl GABA related to anxiety
+feature <- ps_mtg@otu_table["K20265", ps_mtg@sam_data$phenotype == "A"]
+feature <- ps_metabol@otu_table[32,  ps_metabol@sam_data$phenotype == "A"] 
+plot(as.numeric(feature), group_play[colnames(feature)])
+spearman.test(as.numeric(feature), group_play[colnames(feature)])
+
+
+#transporter and carboxythyl GABA related to anxiety
+feature <- ps_mtg@otu_table["K20265", ps_mtg@sam_data$phenotype == "A"]
+feature <- ps_metabol@otu_table[32,  ps_metabol@sam_data$phenotype == "A"] 
+plot(as.numeric(feature), eye_contact[colnames(feature)])
+spearman.test(as.numeric(feature), eye_contact[colnames(feature)])
+```
+
+
+
+
+
+
+
+
+
