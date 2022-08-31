@@ -1,0 +1,2790 @@
+```{r}
+library("rstan")
+library("reshape2")
+library("stringr")
+library("phyloseq")
+#library("ggscaffold")
+library("feather")
+library(ggplot2)
+
+library(DirichletMultinomial)
+library(lattice)
+library(xtable)
+library(parallel)
+library(pheatmap)
+
+library(tm)
+library(slam)
+library(topicmodels)
+
+library(dplyr)
+library(colorspace)
+
+```
+
+# Read in data
+```{r}
+
+setwd("~/Lab/M3/")
+ps_mtg <- readRDS("data/mtg/ps_rle_nooutliers.rds")
+ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
+ps_16s <- readRDS("results/topic_modeling/ps_16s_dds_taxannotation.rds")
+
+#add tax table cause it's missing
+#ps_not_norm_comp <- readRDS("data/16s/ps_DeSeq_pass_min_postDD_min0.03.rds")
+#tax_table(ps_16s) <- ps_not_norm_comp@tax_table
+
+ps_mtt <- readRDS("data/mtt/ps_rle_nooutliers.rds")
+ps_mbx <- readRDS("data/metabol/ps_mbx_rle_nooutliers_fixedmapping_nooutliers.rds")
+```
+
+
+# Plot 5D
+```{r, fig.width=3.5, fig.height= 3}
+library(ggpubr)
+library(svglite)
+library(ragg)
+sgColorPalette <- c("#84CF04","#01B5BB","#E50E63","#6D7272","#8F389E","#DF8236")
+
+df <- data.frame(t(ps_metabol@otu_table))
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$gi <- ps_metabol@sam_data$GI_issues_this_week
+df$stool_freq <- ps_metabol@sam_data$stool_freq
+d <- grep("dodecenoate", colnames(df))
+df <- df[ , c(colnames(df)[d], "phenotype", "stool_freq")]
+colnames(df)[1] <- "dodecenoate"
+df <- df[df$dodecenoate < 20, ]
+df$phenotype <- factor(df$phenotype, levels = c("N", "A"))
+p <- ggplot(df, aes(x = phenotype, y = dodecenoate, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +
+  geom_jitter(width = 0.1, size = 0.1) + theme_bw() +
+  scale_fill_manual(values = sgColorPalette) + stat_compare_means(comparisons = list(c("N", "A")))+
+  theme(text = element_text(size = 12))+
+  scale_y_log10(expand = expansion(mult = c(0, 0.2))) + ggtitle("Stool")
+ggsave("../../5d/5d_human_stool_diff.pdf", width = 2, height = 2)
+getwd()
+#ggsave("../results/5d_boxplot.png", p, height = 3, width = 4, dpi = 5000)
+
+agg_png("../results/5d_boxplot.png", width = 8, height = 7.5, units = "cm", res = 2000)
+p
+invisible(dev.off())
+```
+# 5D and metadata
+```{r}
+
+df <- cbind(df, ps_metabol@sam_data[rownames(df) , c(dietary_variables,"age")])
+df <- df[complete.cases(df), ]
+df <- df %>% select(-c("phenotype", "age"))
+df$stool_freq <- as.numeric(df$stool_freq)
+pheatmap(df)
+
+df$age <- as.numeric(df$age)
+df_use <- df[df$age > 40, ]
+cor.test(df_use$dairy, df_use$dodecenoate, method = "pearson")
+plot(df_use$dairy, df_use$dodecenoate)
+
+
+cor.test(df$age, df$dodecenoate, method = "pearson")
+plot(df$age, df$dodecenoate)
+
+
+```
+
+#  5D and GI symptoms
+```{r}
+library(ggpubr)
+df$stool_freq <- as.numeric(df$stool_freq)
+df$stool <- ifelse(df$stool_freq <= 2, "< 2 bowel movements a day", " > 2 bowel movements a day")
+ggplot(df, aes(x = stool, y = dodecenoate, fill = stool)) + geom_boxplot() + stat_compare_means() + theme_bw()
+
+```
+
+# LCFA and Stool Freq
+```{r}
+#lcfa <- c("myrist", "pentadecy", "palm", "margar", "stear", "nondecy", "arachi", "heneicosy", "behen")
+
+colnames(df)[keep]
+
+df <- data.frame(t(ps_metabol@otu_table))
+df <- data.frame(apply(df, 2, function(x) return((x- mean(x)) / sd(x))))
+
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$gi <- ps_metabol@sam_data$GI_issues_this_week
+
+keep <- sapply(paste0("C", seq(12,18)), function(x){
+  return(grepl(x, colnames(df)) & (grepl("oate", colnames(df))))
+})
+keep <- apply(keep, 1, function(x) return(sum(x) > 0))
+df <- df[, keep]
+#df <- df[ , unlist(sapply(lcfa, function(x) return(grep(x, colnames(df)))))]
+#df <- df[, grepl("ate", colnames(df))]
+#df <- df[ , !grepl("glycerol", colnames(df)) ]
+#df <- df[ , !grepl("carnitine", colnames(df)) ]
+
+
+df$stool_freq <- ps_metabol@sam_data$stool_freq
+df$stool_freq <- as.numeric(df$stool_freq)
+df$stool <- ifelse(df$stool_freq <= 2, "< 2 bowel movements a day", "> 2 bowel movements a day")
+df$stool <- factor(df$stool, levels = c("> 2 bowel movements a day", "< 2 bowel movements a day"))
+
+df_melt <- melt(df %>% select(-c("stool_freq")), id.vars = "stool")
+df_melt$value<- df_melt$value + abs(min(df_melt$value))
+p <- ggplot(df_melt, aes(x = stool, y = value, fill = stool)) + geom_boxplot(outlier.alpha = 0) +
+  geom_jitter(width = 0.01)+
+  stat_compare_means(method = "wilcox.test") + theme_bw()+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+
+df_melt
+t.test(df_melt$value[df_melt$stool == "< 2 bowel movements a day"], df_melt$value[df_melt$stool == "> 2 bowel movements a day" ])
+
+t.test(df_melt$value[df_melt$stool == "> 2 bowel movements a day" ], df_melt$value[df_melt$stool == "< 2 bowel movements a day"])
+
+
+
+
+# LCFA and phenotype
+```
+# Correlation between 5D and long chain fatty acids
+```{r}
+lcfa <- c("myrist", "pentadecy", "palm", "margar", "stear", "nondecy", "arachi", "heneicosy", "behen")
+
+df <- data.frame(t(ps_metabol@otu_table))
+df <- data.frame(apply(df, 2, function(x) return((x- mean(x)) / sd(x))))
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$gi <- ps_metabol@sam_data$GI_issues_this_week
+
+df_plot <- df[ , unlist(sapply(lcfa, function(x) return(grep(x, colnames(df)))))]
+df_plot$d5 <- df[ , grepl("dodecenoate", colnames(df))]
+
+df_plot$stool_freq <- ps_metabol@sam_data$stool_freq
+df_plot$stool_freq <- as.numeric(df_plot$stool_freq)
+df_plot$stool <- ifelse(df_plot$stool_freq <= 2, "< 2 bowel movements a day", "> 2 bowel movements a day")
+df_plot$stool <- factor(df_plot$stool, levels = c("> 2 bowel movements a day", "< 2 bowel movements a day"))
+
+df_melt <- melt(df_plot %>% select(-c("stool_freq")), id.vars = c("d5", "stool"))
+df_melt$value<- df_melt$value + abs(min(df_melt$value))
+p <- ggplot(df_melt, aes(x = d5, y = value, color = stool)) + geom_point() +
+  theme_bw()+
+  geom_smooth()
+```
+
+```{r}
+
+
+```
+
+# Assign taxonomy
+```{r}
+library(dada2)
+getwd()
+tax_table_tmp <- assignTaxonomy(taxa_names(ps_16s), "../silva_nr_v132_train_set.fa.gz")
+
+species <- assignSpecies(taxa_names(ps_16s), "../silva_species_assignment_v138.1.fa.gz")
+tax_table(ps_16s) <- cbind(tax_table_tmp, species)
+
+saveRDS(ps_16s, "ps_16s_dds_taxannotation.rds")
+```
+
+# Create data
+```{r}
+getLDAInput <- function(ps, filter_tresh = 0.05){
+  data.final <- t(round(ps@otu_table))
+  #Filter out less common ASVs
+  keep <- apply(data.final, 2, function(x) return(sum(x>0) > filter_tresh*nrow(data.final)))
+  data.final <- data.final[ , keep]
+  
+  dtm=as.simple_triplet_matrix(data.final)
+  return(dtm)
+}
+
+```
+
+# Cross validation to select number of topics
+```{r, fig.width =10}
+library(topicmodels)
+library(MetaTopics)
+seed_num = 2014
+fold_num = 3
+kv_num = c(2:20)
+dtm <- getLDAInput(ps_mtg, filter_tresh = 0.10)
+sp=smp(cross=fold_num,n=nrow(dtm),seed=seed_num)
+control = list(seed = seed_num, burnin = 1000,thin = 100, iter = 1000)
+system.time((ctmK=selectK(dtm=dtm,kv=kv_num,SEED=seed_num,cross=fold_num,sp=sp,method='Gibbs',control=control)))
+saveRDS(ctmK, "../results/latent_variable_modeling/model_selection/mtg_20topics_3folds.rds")
+plot_perplexity(ctmK,kv_num)
+```
+
+# Train model
+```{r}
+# 16s
+# change to taxa names
+dtm <- getLDAInput(ps_16s, filter_tresh = 0.05)
+colnames(dtm) <- paste(data.frame(ps_16s@tax_table)[colnames(dtm), "Phylum"], 
+                       data.frame(ps_16s@tax_table)[colnames(dtm), "Family"],
+                       data.frame(ps_16s@tax_table)[colnames(dtm), "Species"])
+
+
+k = 3
+dtm <- getLDAInput(ps_16s, filter_tresh = 0.2)
+colnames(dtm) <- data.frame(ps_16s@tax_table)[colnames(dtm), 1]
+model_16s = LDA(dtm, k = 3, method = "VEM",
+                          control = list(seed = seed_num, burnin = 100, thin = 100, iter = 100))
+
+
+```
+
+
+
+
+# Choose number of topics
+```{r}
+plotNumberTopics <- function(directory, prefix, title){
+  likelihoods <- list(rep(NA, 9))
+  for(file in list.files(directory)){
+    i <- sub(".*?_", "", file)
+    i <- sub(".*?_", "", i)
+    i <- sub("topics.*", "", i)
+    #i <- sub("topics_3000iter_0.05filter.rds", "", i)
+    i <- as.numeric(i)-1
+    model <- readRDS(paste0(directory, file))
+    likelihoods[[i]] <- model@loglikelihood
+    rm(model)
+  }
+  
+  log_likelihoods <- unlist(likelihoods)
+  df <- data.frame(numTopics = seq(2, length(log_likelihoods)+1), likelihoods = log_likelihoods)
+  p <- ggplot(df, aes(x = numTopics, y = likelihoods))+
+    geom_point()+
+    geom_line()+
+    xlab("Number of Topics") + ylab("Log Likelihood")+
+    theme_bw()
+  return(p)
+}
+
+p_16s <- plotNumberTopics(directory = "../results/latent_variable_modeling/16s_models/", title = "16s")
+ggsave("../results/latent_variable_modeling/model_selection/likelihood_16s.pdf", p_16s, height = 2, width = 3.5)
+p_mbx <- plotNumberTopics(directory = "../results/latent_variable_modeling/mbx_models/", title = "MBX")
+ggsave("../results/latent_variable_modeling/model_selection/likelihood_mbx.pdf", p_mbx, height = 2, width = 3.5)
+p_mtg <- plotNumberTopics(directory = "../results/latent_variable_modeling/mtg_models/", title = "MTG")
+ggsave("../results/latent_variable_modeling/model_selection/likelihood_mtg.pdf", p_mtg, height = 2, width = 3.5)
+plotNumberTopics(directory = "../results/latent_variable_modeling/mtt_models/", title = "MTT")
+ggsave("../results/latent_variable_modeling/model_selection/likelihood_mtt.pdf", p_mtg, height = 2, width = 3.5)
+
+```
+
+# Simulate data and filter functions
+```{r}
+getSimulatedWord <- function(sample_topic_dist, topic_taxa_dist){
+  topic <- sample(seq(length(sample_topic_dist)), prob = sample_topic_dist, size = 1)
+  taxa <- sample(seq(ncol(topic_taxa_dist)), prob = topic_taxa_dist[topic, ], size = 1)
+  return(taxa)
+}
+
+getSimulatedSample <- function(sample_topic_dist, topic_taxa_dist, n){
+  sim_count <- sapply(seq(n), function(x) return(getSimulatedWord(sample_topic_dist, topic_taxa_dist)))
+  sim_count <- table(sim_count)
+  missing <- seq(1, ncol(topic_taxa_dist))[!seq(1, ncol(topic_taxa_dist)) %in% names(sim_count)]
+  tmp <- rep(0, length(missing))
+  names(tmp) <- missing
+  sim_count <- c(sim_count, tmp)
+  return(sim_count[order(as.numeric(names(sim_count)))])
+}
+
+getSimulatedDataset <- function(ps, model, n = 100){
+  thetas <- model@gamma
+  betas <- exp(model@beta)
+  samples <- sample_names(ps)
+  
+  rownames(thetas) <- samples
+  sample_counts <- colSums(ps@otu_table)
+
+  #sample_counts[sample]
+  if(n == "sample_counts"){
+    sim_list <- lapply(samples, function(sample) return(getSimulatedSample(thetas[sample, ], betas, n = sample_counts[sample])))
+  }else{
+    sim_list <- lapply(samples, function(sample) return(getSimulatedSample(thetas[sample, ], betas, n = n)))
+  }
+  
+  
+  sim_seq_tab <- do.call("rbind", sim_list)
+  rownames(sim_seq_tab) <- sample_names(ps)
+  colnames(sim_seq_tab) <- taxa_names(ps)
+  return(sim_seq_tab)
+}
+
+filterByPrevalence <- function(ps, filter_thresh){
+  data <- round(ps@otu_table)
+  if(taxa_are_rows(ps)){
+    keep <- apply(data, 1, function(x) return(sum(x>0) > filter_thresh*nsamples(ps)))
+    data <- data[keep, ]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = T), sample_data(ps@sam_data), tax_table(ps@tax_table))
+  }else{
+    keep <- apply(data, 2, function(x) return(sum(x > 0)> filter_thresh*nsamples(ps)))
+    data <- data[ , keep]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = F), sample_data(ps@sam_data), tax_table(ps@tax_table))
+  }
+  return(ps_new)
+}
+```
+
+
+```{r}
+
+```
+
+# Load in models
+```{r}
+model_16s <- readRDS("../results/latent_variable_modeling/16s_models/model_16s_3topics_10000iter_5filter.rds")
+#model_16s <- readRDS("../results/topic_modeling/model_16s_30topics_10000iter_5filter.rds")
+model_mtg <- readRDS("../results/topic_modeling/model_mtg_4topics_1000iter_10filter.rds")
+model_mtt <- readRDS("../results/topic_modeling/model_mtt_3topics_1000iter_10filter.rds")
+model_mbx <- readRDS("../results/latent_variable_modeling/mbx_models/model_mbx_13topics_200000iter_0.1filter.rds")
+#model_metabol <- readRDS("../results/topic_modeling/model_metabol_30topics_10000iter_10filter.rds")
+```
+
+
+```{r}
+# 16s
+model_16s <- readRDS("../results/latent_variable_modeling/16s_models/model_16s_3topics_10000iter_0.05filter.rds")
+ps_16s_filt <- filterByPrevalence(ps_16s, 0.05)
+time_start <- Sys.time()
+sim_counts_16s <- getSimulatedDataset(ps_16s_filt, model_16s, n = "sample_counts")
+saveRDS(sim_counts_16s, "sim_counts_16s_3topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+
+model_16s <- readRDS("../results/latent_variable_modeling/16s_models/model_16s_10topics_10000iter_0.05filter.rds")
+ps_16s_filt <- filterByPrevalence(ps_16s, 0.05)
+time_start <- Sys.time()
+sim_counts_16s <- getSimulatedDataset(ps_16s_filt, model_16s, n = "sample_counts")
+saveRDS(sim_counts_16s, "sim_counts_16s_10topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+rm(model_16s)
+rm(sim_counts_16s)
+
+# mtg
+model_mtg <- readRDS("../results/latent_variable_modeling/mtg_models/model_mtg_3topics_3000iter_0.1filter.rds")
+ps_mtg_filt <- filterByPrevalence(ps_mtg, 0.1)
+time_start <- Sys.time()
+sim_counts_mtg <- getSimulatedDataset(ps_mtg_filt, model_mtg, n = 100000)
+saveRDS(sim_counts_mtg, "sim_counts_mtg_3topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+
+model_mtg <- readRDS("../results/latent_variable_modeling/mtg_models/model_mtg_10topics_3000iter_0.1filter.rds")
+ps_mtg_filt <- filterByPrevalence(ps_mtg, 0.1)
+time_start <- Sys.time()
+sim_counts_mtg <- getSimulatedDataset(ps_mtg_filt, model_mtg, n = 100000)
+saveRDS(sim_counts_mtg, "sim_counts_mtg_10topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+rm(model_mtg)
+rm(sim_counts_mtg)
+
+# mtt
+model_mtt <- readRDS("../results/latent_variable_modeling/mtt_models/model_mtt_3topics_3000iter_0.1filter.rds")
+ps_mtt_filt <- filterByPrevalence(ps_mtt, 0.1)
+time_start <- Sys.time()
+sim_counts_mtt <- getSimulatedDataset(ps_mtt_filt, model_mtt, n = 100000)
+saveRDS(sim_counts_mtt, "sim_counts_mtt_3topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+
+model_mtt <- readRDS("../results/latent_variable_modeling/mtt_models/model_mtt_10topics_3000iter_0.1filter.rds")
+ps_mtt_filt <- filterByPrevalence(ps_mtt, 0.1)
+time_start <- Sys.time()
+sim_counts_mtt <- getSimulatedDataset(ps_mtt_filt, model_mtt, n = 100000)
+saveRDS(sim_counts_mtt, "sim_counts_mtt_10topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+rm(model_mtt)
+rm(sim_counts_mtt)
+
+
+# mbx
+model_mbx <- readRDS("../results/latent_variable_modeling/mbx_models/model_mbx_3topics_200000iter_0.1filter.rds")
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+time_start <- Sys.time()
+sim_counts_mbx <- getSimulatedDataset(ps_mbx_filt, model_mbx, n = 30000)
+saveRDS(sim_counts_mbx, "sim_counts_mbx_3topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+
+model_mbx <- readRDS("../results/latent_variable_modeling/mbx_models/model_mbx_100topics_200000iter_0.1filter.rds")
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+time_start <- Sys.time()
+sim_counts_mbx <- getSimulatedDataset(ps_mbx_filt, model_mbx, n = 30000)
+saveRDS(sim_counts_mbx, "sim_counts_mbx_100topics.rds")
+time_end <- Sys.time()
+print(time_end - time_start)
+
+
+```
+
+# pcoa of each dataset
+```{r}
+library(vegan)
+procrustesTest <- function(data_true, data_sim, k = 50, scale = FALSE, title = ""){
+  scores_true <- svd(scale(data_true, scale = scale))$u[ , seq(k)]
+  loadings_true <-  svd(scale(data_true, scale = scale))$v[ , seq(k)]
+  evals_true <-  svd(scale(data_true, scale = scale))$d[k]
+  
+  scores_sim <- svd(scale(data_sim, scale = scale))$u[ , seq(k)]
+  loadings_sim <-  svd(scale(data_sim, scale = scale))$v[ , seq(k)]
+  evals_sim <-  svd(scale(data_sim, scale = scale))$d[k]
+  
+  aligned_scores <- procrustes(scores_true, scores_sim)$Yrot
+  aligned_loadings <- procrustes(loadings_true, loadings_sim)$Yrot
+  
+  tmp <- procrustes(as.matrix(scores_true), as.matrix(scores_sim))
+  
+  plot(tmp, main = title, type= "text")
+  plot(tmp, kind = 2, main = title)
+  protest(X = as.matrix(scores_true), Y = as.matrix(scores_sim), scores = "sites", permutations = 999)
+  
+  
+  keep <- tmp[[1]][,2] > -0.1 & tmp[[1]][,1] < 0.2
+  data_true <- data_true[keep, ]
+  data_sim <- data_sim[keep, ]
+  tmp[[1]] <- tmp[[1]][tmp[[1]][,2] > -0.1 & tmp[[1]][,1] < 0.2, ]
+  plot(tmp, main = title, type= "text")
+  return(tmp)
+}
+
+
+# I think this means that the fit is actually good, because there is only expansion, not really rotation. Samples in true data and samples in simulated data are lined up pretty perfectly in terms of relative ratio of taxa, but the values in the model are higher. So we should center, and use more dimensions from the pca
+```
+
+
+# check quantile similarity
+```{r, fig.width = 12}
+
+quantileTest <- function(data_true, data_sim){
+  quantiles_true <- apply(data_true, 1, quantile, probs = seq(0, .98, 0.05))
+  quantiles_sim <- apply(data_sim, 1, quantile, probs = seq(0, .98, 0.05))
+  
+  melted_true <- melt(quantiles_true)
+  melted_true$type <- rep("true", nrow(melted_true))
+  colnames(melted_true) <- c("quantile", "sample", "quantile_value", "type")
+  
+  melted_sim <- melt(quantiles_sim)
+  melted_sim$type <- rep("sim", nrow(melted_sim))
+  colnames(melted_sim) <- c("quantile", "sample", "quantile_value", "type")
+  
+  df <- data.frame(cbind(melted_true, melted_sim))
+  line <- lm(quantile_value ~ quantile_value.1, df)
+  p <- ggplot(df, aes(x = quantile_value, y = quantile_value.1)) +
+    geom_point() +
+    geom_smooth(method='lm', formula= y~x)+
+    ggplot2::annotate("text", size = 4, x = min(df$quantile_value) + sd(df$quantile_value) + 2, y = max(df$quantile_value.1) + sd(df$quantile_value.1), label = paste0("R2 = ", round(summary(line)[[9]], 3)))+
+    theme(axis.text = element_text(size = 6.5))+
+    theme_bw()+
+    xlab("Quantile Values True") + ylab("Quantile Values Simulated")+
+    ylim(c(0,  max(df$quantile_value.1) + sd(df$quantile_value.1)))
+  print(p)
+  return(p)
+
+}
+```
+
+# Filter and evaluate model
+```{r, fig.width = 15, fig.height = 5}
+getModelFit <- function(ps, sim_counts, title = ""){
+  data_true = t(ps@otu_table)
+  data_sim = sim_counts
+  pro_res <- procrustesTest(data_true, data_sim, scale = F, k = 30, title = title)
+  p3 <- quantileTest(data_true, data_sim)
+  return(list(pro_res, p3))
+}
+
+dropPoorFittingSamples <- function(ps, sim_counts, procrustes_res, thresh = 0.6){
+  samples_keep <- residuals(procrustes_res) < thresh
+  ps <- prune_samples(samples_keep, ps)
+  sim_counts <- sim_counts[samples_keep, ]
+  data_true = t(ps@otu_table)
+  data_sim = sim_counts
+  getModelFit(ps, data_sim)
+  return(list(ps = ps, sim_counts = sim_counts, samples_keep = samples_keep))
+}
+
+# 16s 3 topics
+ps_16s_filt <- filterByPrevalence(ps_16s, 0.05)
+sim_counts_16s <- readRDS("sim_counts_16s_3topics.rds")
+tmp <- getModelFit(ps_16s_filt, sim_counts_16s)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_16s_3topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "16s 3 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_16s_3topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "16s 3 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_16s_3topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+# 16s 10 topics
+ps_16s_filt <- filterByPrevalence(ps_16s, 0.05)
+sim_counts_16s <- readRDS("sim_counts_16s_10topics.rds")
+tmp <- getModelFit(ps_16s_filt, sim_counts_16s)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_16s_10topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "16s 10 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_16s_10topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "16s 10 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_16s_10topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+# MTG 3 topics
+ps_mtg_filt <- filterByPrevalence(ps_mtg, 0.1)
+sim_counts_mtg <- readRDS("sim_counts_mtg_3topics.rds")
+tmp <- getModelFit(ps_mtg_filt, sim_counts_mtg)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mtg_3topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mtg 3 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mtg_3topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mtg 3 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mtg_3topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+# MTG 10 topics
+ps_mtg_filt <- filterByPrevalence(ps_mtg, 0.1)
+sim_counts_mtg <- readRDS("sim_counts_mtg_10topics.rds")
+tmp <- getModelFit(ps_mtg_filt, sim_counts_mtg)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mtg_10topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mtg 10 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mtg_10topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mtg 10 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mtg_10topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+
+# MTT 3 topics
+ps_mtt_filt <- filterByPrevalence(ps_mtt, 0.1)
+sim_counts_mtt <- readRDS("sim_counts_mtt_3topics.rds")
+tmp <- getModelFit(ps_mtt_filt, sim_counts_mtt)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mtt_3topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mtt 3 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mtt_3topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mtt 3 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mtt_3topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+# MTT 10 topics
+ps_mtt_filt <- filterByPrevalence(ps_mtt, 0.1)
+sim_counts_mtt <- readRDS("sim_counts_mtt_10topics.rds")
+tmp <- getModelFit(ps_mtt_filt, sim_counts_mtt)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mtt_10topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mtt 10 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mtt_10topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mtt 10 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mtt_10topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+
+# MBX 3 topics
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+sim_counts_mbx <- readRDS("sim_counts_mbx_3topics.rds")
+tmp <- getModelFit(ps_mbx_filt, sim_counts_mbx)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mbx_3topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mbx 3 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mbx_3topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mbx 3 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mbx_3topics.pdf" ,tmp[[2]], width = 5, height = 2.3)
+
+# MBX 10 topics
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+sim_counts_mbx <- readRDS("sim_counts_mbx_100topics.rds")
+tmp <- getModelFit(ps_mbx_filt, sim_counts_mbx)
+pdf("../results/latent_variable_modeling/model_selection/procrustes1_mbx_100topics.pdf",  width = 5, height = 5)
+p <- plot(tmp[[1]], kind = 1, title = "mbx 30 topic")
+dev.off()
+
+pdf("../results/latent_variable_modeling/model_selection/procrustes2_mbx_30topics.pdf",  width = 7, height = 3)
+plot(tmp[[1]], kind = 2, title = "mbx 30 topic")
+dev.off()
+ggsave("../results/latent_variable_modeling/model_selection/quantileTest_mbx_100topics.pdf",tmp[[2]], width = 5, height = 2.3)
+
+
+data_true <- t(ps_mbx@otu_table)
+thresh <- mean(apply(data_true, 1, max)) + sd(apply(data_true, 1, max))/2
+keep <- apply(data_true, 1, max) < thresh
+hist(apply(data_true[keep, ], 1, max))
+ps_mbx_remove_outliers <- prune_samples(keep, ps_mbx)
+saveRDS(ps_mbx_remove_outliers, file = "../data/metabol/ps_rle_nooutliers_fixedmapping_nooutliers.rds")
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+ps_mbx_filt <- prune_samples(keep, ps_mbx_filt)
+sim_counts_mbx <- readRDS("sim_counts_mbx_100topics.rds")
+sim_counts_mbx <- sim_counts_mbx[keep, ]
+tmp <- getModelFit(ps_mbx_filt, sim_counts_mbx)
+tmp[[2]]
+
+
+# Drop samples that REALLY don't fit model, because model won't be helpful in explaining them
+drop_res <- dropPoorFittingSamples(ps_mbx_filt, sim_counts_metabol, tmp[[1]], thresh = 0.8)
+ps_mbx_filt_prune <- drop_res$ps
+sim_counts_mbx <- drop_res$sim_counts
+samples_keep_mbx <- drop_res$samples_keep
+tmp <- getModelFit(ps_mbx_filt_prune , sim_counts_mbx)
+# 16s: The high end of the models are way higher and more variable than the actual counts
+
+# MTG: the counts are more evenly spread out among genes (low end is higher and high end is lower) than the actual counts
+```
+
+
+
+
+# Based on this, I think that the model is more likely to simulate higher counts for the most common taxa. In reality, the most common taxa are actually seen less frequently than the model thinks they are. This is in line with the 'expansion' phenomenon seen in the procrustes. From all of this, I'm going to say that actually the model fits ok!
+```
+```
+
+# Line up topics based on shared distributions across samples
+```{r}
+thetas_16s <- model_16s@gamma
+rownames(thetas_16s) <- sample_names(ps_16s_filt)
+betas_16s <- model_16s@beta
+tax <- data.frame(ps_16s_filt@tax_table)
+colnames(betas_16s) <- paste(tax[, 2], tax[, 7], tax[,8])
+#thetas_16s <- apply(thetas_16s, 2, function(x) return((x - mean(x)) / sd(x)))
+  
+thetas_mtg <- model_mtg@gamma
+rownames(thetas_mtg) <- sample_names(ps_mtg_filt)
+betas_mtg <- model_mtg@beta
+tax <- data.frame(ps_mtg_filt@tax_table)
+colnames(betas_mtg) <- tax[,2]
+#thetas_mtg <- apply(thetas_mtg, 2, function(x) return((x - mean(x)) / sd(x)))
+
+thetas_mtt <- model_mtt@gamma
+rownames(thetas_mtt) <- sample_names(ps_mtt_filt)
+betas_mtt <- model_mtt@beta
+tax <- data.frame(ps_mtt_filt@tax_table)
+colnames(betas_mtt) <- tax[,2]
+#thetas_mtt <- apply(thetas_mtt, 2, function(x) return((x - mean(x)) / sd(x)))
+
+thetas_metabol <- model_mbx@gamma
+rownames(thetas_metabol) <- sample_names(ps_mbx_filt)
+betas_metabol <- model_mbx@beta
+tax <- data.frame(ps_mbx_filt@tax_table)
+colnames(betas_metabol) <- tax[ , 2]
+#thetas_metabol <- apply(thetas_metabol, 2, function(x) return((x - mean(x)) / sd(x)))
+
+correlateTopics <- function(data1, data2){
+  samples <- intersect(rownames(data1), rownames(data2))
+  data1 <- data1[samples, ]
+  data2 <- data2[samples, ]
+  corr_p <- matrix(rep(0, ncol(data1) * ncol(data2)), nrow = ncol(data1))
+  corr_r <- matrix(rep(0, ncol(data1) * ncol(data2)), nrow = ncol(data1))
+  for(i in seq(1, ncol(data1))){
+    for(j in seq(1, ncol(data2))){
+        if(sum(is.na(data1[, i])) == 0 & sum(is.na(data2[, j])) == 0){
+          test <- cor.test(data1[ ,i], data2[ ,j], method = "pearson")
+          corr_p[i, j] <- test$p.value
+          corr_r[i,j] <- test$statistic
+        }else{
+          corr_p[i,j] = NA
+          corr_r[i,j] = NA
+        }
+
+    }
+  }
+  return(list(corr_p = corr_p, corr_r = corr_r))
+}
+
+tmp <- correlateTopics(thetas_16s, thetas_mtg)
+print("16s vs MTG")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_16s, thetas_mtt)
+print("16s vs MTt")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_16s, thetas_metabol)
+print("16s vs Metabol")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_mtg, thetas_metabol)
+print("MTG vs Metabol")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_mtt, thetas_metabol)
+print("MTT vs Metabol")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+#Grouping 1
+thetas_16s <- thetas_16s[ , c(1,2,3)]
+betas_16s <- betas_16s[c(1,2,3), ]
+
+thetas_mtg <- thetas_mtg[ , c(2, 3, 4)]
+betas_mtg <- betas_mtg[c(4, 3, 2), ]
+
+thetas_mtt <- thetas_mtt[ , c(2, 3, NA)]
+betas_mtt <- betas_mtt[c(2,3, NA), ]
+
+thetas_metabol <- thetas_metabol[, c(1, NA, 2)]
+betas_metabol <- betas_metabol[c(1, NA, 2), ]
+
+colnames(thetas_16s) <- paste0("topic", seq(1:ncol(thetas_16s)), "_16s")
+colnames(thetas_mtg) <- paste0("topic", seq(1:ncol(thetas_mtg)), "_MTG")
+colnames(thetas_mtt) <- paste0("topic", seq(1:ncol(thetas_mtt)), "_MTT")
+colnames(thetas_metabol) <- paste0("topic", seq(1:ncol(thetas_metabol)), "_MBX")
+
+rownames(betas_16s) <- paste0("topic", seq(1:ncol(thetas_16s)), "_16s")
+rownames(betas_mtg) <- paste0("topic", seq(1:ncol(thetas_mtg)), "_MTG")
+rownames(betas_mtt) <- paste0("topic", seq(1:ncol(thetas_mtt)), "_MTT")
+rownames(betas_metabol) <- paste0("topic", seq(1:ncol(thetas_metabol)), "_MBX")
+
+#CHECK: should have TRUE along diagonal
+tmp <- correlateTopics(thetas_16s, thetas_mtg)
+print("16s vs MTG")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_16s, thetas_mtt)
+print("16s vs MTT")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_16s, thetas_metabol)
+print("16s vs Metabol")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_mtg, thetas_mtt)
+print("MTG vs MTT")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+tmp <- correlateTopics(thetas_mtg, thetas_metabol)
+print("MTG vs Metabol")
+tmp$corr_p < .05 & tmp$corr_r > 0
+
+
+#tmp <- correlateTopics(thetas_mtg, thetas_metabol)
+#print("MTG vs Metabol")
+#tmp$corr_p < .05 & tmp$corr_r > 0
+
+#topic 3 in metabol correlates with topic 3 in mtt, which correlates with spot 2, but topic 3 in metabol doesn't directly correlate with spot 2
+#tmp <- correlateTopics(thetas_mtt, thetas_metabol)
+#print("MTT vs Metabol")
+#tmp$corr_p < .05 & tmp$corr_r > 0
+
+#tmp <- correlateTopics(thetas_mtt, thetas_mtg)
+#print("MTT vs MTG")
+#tmp$corr_p < .05 & tmp$corr_r > 0
+
+```
+
+
+# Get Correlations
+```{r, fig.width=6, fig.height=6}
+getCorrelationsMetadata <- function(ps, thetas, ending,  n ){
+    
+    rownames(thetas) == sample_names(ps@sam_data)
+    
+    df <- data.frame(cbind(thetas, ps@sam_data))
+    df$stool_freq <- as.numeric(ps@sam_data$stool_freq)
+    df$cat <- as.integer(ps@sam_data$cat)
+    df$phenotype <- as.integer(ifelse(ps@sam_data$phenotype == "A", 1, 0))
+    df$csection <- as.integer(as.logical(ps@sam_data$csection))
+    colnames(df)[1:n] <- paste0("topic", seq(1, n), "_", ending)
+    topics <- colnames(df)[1:n]
+  
+    control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "phenotype", "probiotic", "csection", "vitamin_B", "vitamin_D", "age")
+    
+    correlations <- lapply(topics, function(topic){
+      print(topic)
+      if(sum(is.na(thetas[ , topic])) == 0){
+        
+        cor_res <- lapply(control_variables, function(x){
+          print(x)
+          tmp <- df[!is.na(df[ , x]), ]
+          tmp[, x] <- as.numeric(tmp[,x])
+          return(cor.test(tmp[, topic], tmp[, x], method = "spearman"))
+        })
+        pvals <- unlist(lapply(cor_res, function(x) return(x$p.value)))
+        names(pvals) <- control_variables
+        rvals <- unlist(lapply(cor_res, function(x) return(x$estimate)))
+        names(rvals) <- control_variables
+        p_adj <- p.adjust(pvals, method = "fdr")
+        print(sum(p_adj < .05) / length(p_adj))
+        print(control_variables[p_adj < 0.05 & abs(rvals) > 0.1])
+        return(list(rvals = rvals, p_adj = p_adj))
+      }else{
+        return(list(rvals = NA, p_adj = NA))
+      }
+      
+    })
+    names(correlations) <- topics
+    
+    rvals_mat <- do.call(rbind, lapply(correlations, function(x){ return(x$rvals)}))
+    return(rvals_mat)
+}
+
+palette = "Purple-Green"
+width = 4
+rvals_16s <- getCorrelationsMetadata(ps_16s_filt, thetas_16s, ending = "16s", n = 3)
+p <- pheatmap(t(rvals_16s), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
+ggsave("../results/latent_variable_modeling/metadata_corr_16s.pdf", p, width = width, height = 6)
+
+rvals_mtg <- getCorrelationsMetadata(ps_mtg_filt, thetas_mtg, ending = "MTG",n = 3)
+p <- pheatmap(t(rvals_mtg), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
+ggsave("../results/latent_variable_modeling/metadata_corr_mtg.pdf", p, width = width, height = 6)
+
+rvals_mtt <- getCorrelationsMetadata(ps_mtt_filt, thetas_mtt,ending = "MTT", n = 3)
+p <- pheatmap(t(rvals_mtt[!is.na(rowSums(rvals_mtt)), ]), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
+ggsave("../results/latent_variable_modeling/metadata_corr_mtt.pdf", p, width = width, height = 6)
+
+rvals_metabol <- getCorrelationsMetadata(ps_mbx_filt, thetas_metabol, ending = "MBX", n = 3)
+p<- pheatmap(t(rvals_metabol[!is.na(rowSums(rvals_metabol)), ]), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
+ggsave("../results/latent_variable_modeling/metadata_corr_mbx.pdf", p, width = width, height = 6)
+
+```
+
+
+# Taxa contributions to 16s topics
+```{r, fig.height=10, fig.width = 8}
+
+p <- pheatmap(t(rvals_16s), cluster_cols= F, cluster_rows = F,
+              color =diverging_hcl(n = 300, palette = "PurpleGreen", rev = T, alpha = 0.8),
+              fontsize_row = 14,
+              fontsize_col = 12)
+p
+ggsave("../results/latent_variable_modeling/topic_metadata_16s.pdf", p, width = 4.5, height = 8)
+
+betas <- exp(betas_16s)
+limit <- quantile(apply(betas, 2, max), probs = seq(0,1, .01))['97%']
+keep <- apply(betas, 2, max) > limit
+to_plot <- t(betas[, keep])
+p <- pheatmap(to_plot, cluster_cols = F, 
+              color = diverging_hcl(20, palette = "PurpleGreen", rev = T, alpha = 0.8),
+              fontsize_col = 14,
+              fontsize_row = 12)
+ggsave("../results/latent_variable_modeling/topic_features_16s.pdf", p, width = 6, height = 8)
+#limitation of this approach is that it overweights common bacteria. We could visualize more rare taxa by comparing the difference between the 1topic model and the 3 topic model
+```
+
+
+# Gene contributions to mtg topics
+```{r, fig.height=10, fig.width = 10}
+
+rvals_mtg <- rvals_mtg[c("topic1_MTG", "topic3_MTG"), ]
+
+p <- pheatmap(t(rvals_mtg), cluster_cols= F, cluster_rows = F,
+              color = diverging_hcl(n = 300, palette = "PurpleGreen", rev = T, alpha = 0.8),
+              fontsize_row = 14,
+              fontsize_col = 12)
+ggsave("../results/latent_variable_modeling/topic_metadata_mtg.pdf", p, width = 4.5, height = 8)
+
+
+
+betas <- exp(betas_mtg)
+limit <- quantile(apply(betas, 2, max), probs = seq(0,1, .001))['99.6%']
+keep <- apply(betas, 2, max) > limit
+to_plot <- t(betas[, keep])
+#to_plot[to_plot > 0.03] = 0.03
+p <- pheatmap(to_plot, cluster_cols =F,color = diverging_hcl(20, palette = "PurpleGreen",rev = T, alpha = 0.8))
+
+#p <- pheatmap(to_plot, breaks = c(seq(min(to_plot), max(to_plot[to_plot <= .03]), 0.00025), max(to_plot)), cluster_cols = F,color = diverging_hcl(20, palette = "PurpleGreen",rev = T))
+
+to_plot <- to_plot[, c("topic1_MTG", "topic3_MTG")]
+quantile_breaks <- function(xs, n = 10) {
+    breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+    return(breaks[!duplicated(breaks)])
+}
+
+mat_breaks <- quantile_breaks(unlist(to_plot), n = 100)
+
+
+p <- pheatmap(to_plot, cluster_cols = F,
+              color = diverging_hcl(140, palette = "PurpleGreen", rev = T, alpha = 0.8),
+              breaks = mat_breaks,
+              fontsize_col = 14,
+              fontsize_row = 12)
+
+
+p
+ggsave("../results/latent_variable_modeling/topic_features_mtg.pdf", p, width = 8, height = 8)
+
+#limitation of this approach is that it overweights common bacteria. We could visualize more rare taxa by comparing the difference between the 1topic model and the 3 topic model
+p
+```
+
+# Gene contributions to mtt topics
+```{r, fig.height=10, fig.width = 8}
+
+p <- pheatmap(t(rvals_mtt[!is.na(rowSums(rvals_mtt)), ]), cluster_cols =F, cluster_rows = F,
+              color = diverging_hcl(20, palette = "PurpleGreen", rev = T, alpha = 0.8))
+ggsave("../results/latent_variable_modeling/topic_metadata_mtt.pdf", p, width = 6, height = 8)
+
+betas <- exp(betas_mtt)[!is.na(rowSums(betas_mtt)), ]
+limit <- quantile(apply(betas, 2, max), probs = seq(0,1, .001))['99.5%']
+keep <- apply(betas, 2, max) > limit
+to_plot <- t(betas[, keep])
+pheatmap(to_plot, color = diverging_hcl(20, palette = "PurpleGreen",rev = T, alpha = 0.8))
+#pheatmap(to_plot, breaks = c(seq(min(to_plot), max(to_plot[to_plot < .006]), 0.00001), max(to_plot)), cluster_cols = F, color = diverging_hcl(20, palette = "PurpleGreen",rev = T))
+
+#limitation of this approach is that it overweights common bacteria. We could visualize more rare taxa by comparing the difference between the 1topic model and the 3 topic model
+```
+
+# Metabolite contribution to topics
+```{r, fig.height=10, fig.width = 8}
+rvals_metabol <- getCorrelationsMetadata(ps_metabol_filt, thetas_metabol, ending = "MBX", n = 3)
+rvals_metabol <- rvals_metabol[!is.na(rowSums(rvals_metabol)), ]
+p <- pheatmap(t(rvals_metabol), cluster_cols= F, cluster_rows = F,
+              color =diverging_hcl(n = 300, palette = "PurpleGreen", rev = T, alpha = 0.8),
+              fontsize_row = 14,
+              fontsize_col = 12)
+ggsave("../results/latent_variable_modeling/topic_metadata_mbx.pdf", p, width = 4.5, height = 8)
+
+betas <- exp(betas_metabol)[!is.na(rowSums(betas_metabol)), ]
+limit <- quantile(apply(betas, 2, max), probs = seq(0,1, .001))['97.5%']
+keep <- apply(betas, 2, max) > limit
+to_plot <- t(betas[, keep])
+
+quantile_breaks <- function(xs, n = 10) {
+    breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+    return(breaks[!duplicated(breaks)])
+}
+
+mat_breaks <- quantile_breaks(unlist(to_plot), n = 20)
+
+p <- pheatmap(to_plot, cluster_cols = F,
+         color = diverging_hcl(14, palette = "PurpleGreen", rev = T, alpha = 0.8),
+         breaks = mat_breaks,
+         fontsize_col = 14,
+         fontsize_row = 14,
+         fontsize = 14)
+#p <- pheatmap(to_plot, breaks = c(seq(min(to_plot), max(to_plot[to_plot < .01]), 0.0001), max(to_plot)), cluster_cols = F,color = diverging_hcl(20, palette = "PurpleGreen",rev = T))
+ggsave("../results/latent_variable_modeling/topic_features_mbx.pdf", p, width = 6.8, height = 8)
+#limitation of this approach is that it overweights common bacteria. We could visualize more rare taxa by comparing the difference between the 1topic model and the 3 topic model
+```
+
+
+
+# Full heatmap
+```{r, fig.height=10}
+samples <- intersect(intersect(intersect(rownames(thetas_16s), rownames(thetas_mtg)), rownames(thetas_mtt)), rownames(thetas_metabol))
+
+
+df <- data.frame(cbind(thetas_16s[samples, ], thetas_mtg[samples, ], thetas_mtt[samples, ], thetas_metabol[samples, ]))
+df <- df[, !is.na(colSums(df))]
+phen <- data.frame('phenotype' = ps_16s_filt@sam_data[rownames(df), 'phenotype'])
+
+p <- pheatmap(df, annotation_row = phen, cluster_cols = T, clustering_distance_cols = 'correlation', color = diverging_hcl(200, palette = "PurpleGreen",rev = T))
+
+# If we were to subdivide into people high in topic 1 vs 2, would we gain clarity as to the difference between the groups
+#clustering <- cutree(p$tree_col, k = 2)
+#names(clustering) == rownames(df)
+#data2 <- df_phen[clustering == 1, ]
+#data1 <- df_phen[clustering == 2, ]
+
+#pheatmap(data1 %>% select(-c('phenotype')), cluster_cols =F, clustering_distance_cols = 'correlation', main = "Data 1", 
+#         color = diverging_hcl(200, palette = "PurpleGreen",rev = T,alpha = 0.8))
+#pheatmap(data2 %>% select(-c('phenotype')), cluster_cols =F, clustering_distance_cols = 'correlation', main = "Data 2",
+#         color = diverging_hcl(200, palette = "PurpleGreen",rev = T, alpha = 0.8))
+
+```
+
+# subset samples into topic clusters
+```{r, fig.width=12, fig.height = 9}
+# I didn't see this coming, but looks like when you include phenotype as a factor, the first split in the hierarchical clustering is actually NOT phenotype, but along microbiome topic clusterings. This is support for subtyping
+df_phen <- df
+df_phen$phenotype <- phen$phenotype
+df_phen$phenotype <- ifelse(df_phen$phenotype == "A", 1, 0)
+df_plot <- df_phen
+rownames(df_plot) <- as.character(unlist(ps_mtg@sam_data[rownames(df), "host_name"]))
+rownames(phen) <- as.character(unlist(ps_mtg@sam_data[rownames(df), "host_name"]))
+
+quantile_breaks <- function(xs, n = 10) {
+    breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+    return(breaks[!duplicated(breaks)])
+}
+
+mat_breaks <- quantile_breaks(unlist(df_plot), n = 100)
+
+p <- pheatmap(t(df_phen), cluster_rows = F,
+              color = diverging_hcl(100, palette = "PurpleGreen",rev = T, alpha = 0.8),
+              breaks = mat_breaks,
+              fontsize_row = 16)
+
+ggsave("../results/latent_variable_modeling/subtyping.pdf", p, height = 5, width = 10)
+clustering <- cutree(p$tree_col, k = 3)
+names(clustering) == rownames(df)
+data1 <- df_phen[clustering == 1, ]
+data2 <- df_phen[clustering == 2, ]
+data3 <- df_phen[clustering == 3, ]
+
+#rownames(phen) <- rownames(df)
+#pheatmap(data1 %>% select(-c('phenotype')), cluster_cols =F, clustering_distance_cols = 'correlation', main = "Data 1", 
+#         color = diverging_hcl(200, palette = "PurpleGreen",rev = T,alpha = 0.8))
+#pheatmap(data2 %>% select(-c('phenotype')), cluster_cols =F, clustering_distance_cols = 'correlation', main = "Data 2",
+#         color = diverging_hcl(200, palette = "PurpleGreen",rev = T, alpha = 0.8))
+
+
+```
+
+# Check how family ids separate in clusters
+```{r}
+families1 <- ps_mtg@sam_data[rownames(data1), ]$familyID
+families2 <- ps_mtg@sam_data[rownames(data2), ]$familyID
+families_split <- intersect(families1, families2)
+cat(length(families_split), " families are split into different groups out of ", sum(nrow(data1), nrow(data2)), "\n")
+families_split
+table(families1)
+table(families2)
+```
+
+# Mutual information importance of topics
+```{r, fig.width = 6, fig.height = 4}
+# when using 30 topics for 16s and metabolomics, and including a column for phenotype, clusters break out into all nt, and mixed, which is interesting, but I don't know if it holds water
+library(Boruta)
+library(ggpubr)
+
+#col1 <- diverging_hcl(2, palette = "PurpleGreen", rev = T, alpha = 0.8)[1]
+#col2 <- diverging_hcl(2, palette = "PurpleGreen", rev = T, alpha = 0.8)[2]
+col1 <- "#DB5461"
+col2 <- "#AE8E1C"
+col3 <- "blue"
+
+#separate into clusters based on phenotype and topics - topic1_MTG
+set.seed(1)
+df_phen$cluster <- rep(NA, nrow(df_phen)) 
+df_phen$cluster[rownames(df_phen) %in% rownames(data1)]= "cluster1"
+df_phen$cluster[rownames(df_phen) %in% rownames(data2)]= "cluster2"
+df_phen$cluster[rownames(df_phen) %in% rownames(data3)]= "cluster3"
+df_phen$cluster <- as.factor(df_phen$cluster)
+
+out <- Boruta(df_phen %>% select(-c("cluster", "phenotype")), df_phen$cluster)
+out
+df_plot <- df[ , names(out$finalDecision[out$finalDecision == "Confirmed"])]
+df_plot$cluster <- df_phen$cluster
+p <- ggplot(melt(df_plot, id.vars = c("cluster")), aes(x = variable, y = value, fill = cluster)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "t.test")+
+  xlab("")+
+  theme_bw() +theme(axis.text.x = element_text(angle = 70, vjust = 0.9, hjust=1, size = 12),
+                    legend.text = element_text(size = 11)) +
+  scale_fill_manual(values = c(col1, col2, col3), name = "")+
+  ggtitle("To Cluster")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.09)))#the all nt group has lower topic MTG and MTT, which correlate with healthy eating (high veg, fruit, fat_oil). So they eat LESS healthy overall. The mixed group is generally high in topic3, so they eat very healthy overall
+ggsave("../results/latent_variable_modeling/subsetting_topics.pdf",p,  width = 7, height = 4.2)
+
+
+# which metadata explain the groups
+control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "phenotype", "probiotic", "csection", "vitamin_B", "vitamin_D", "age")
+metadata <- data.frame(ps_mtg@sam_data[rownames(df_phen), control_variables])
+metadata$cluster <- df_phen$cluster
+metadata <- metadata[apply(metadata, 1, function(x) return(sum(is.na(x)) == 0)), ]
+out <- Boruta(metadata %>% select(-c("cluster", "phenotype")), metadata$cluster)
+out
+
+
+# within group 1
+group <- data1
+group$phenotype <- as.factor(ifelse(group$phenotype == 1, "A", "N"))
+out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+out
+
+# Within group 2 : more mixed
+group <- data2
+group$phenotype <- as.factor(ifelse(group$phenotype == 1, "A", "N"))
+out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+out
+df_plot<- group[ , names(out$finalDecision[out$finalDecision == "Confirmed" ]), drop = F]
+df_plot$phenotype <- group$phenotype
+ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = variable, y = value, fill = phenotype)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "t.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Within cluster 2") + theme_bw()
+
+#within the mixed group, who eats healthy...
+group_mixed <- data1
+group_mixed$phenotype <- as.factor(ifelse(group_mixed$phenotype == 1, "A", "N"))
+out <- Boruta(group_mixed %>% select(-c("phenotype")), group_mixed$phenotype)
+out
+ # in mixed group, topic2_MTT and topic3_MTT are important to distinguish between phenotypes. topic 2 is associated with unhealthy eating (low fruit low veg). TOpic 3 is healthy eating. 
+
+#df_plot<- group_mixed[ , names(out$finalDecision[out$finalDecision == "Confirmed"])]
+#df_plot$phenotype <- group_mixed$phenotype
+#ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = variable, y = value, fill = phenotype)) +
+#  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "t.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# MBX: differ between groups
+```{r, fig.width = 10}
+getImportantFactors <- function(ps, data, iter = 5){
+  imp <- c()
+  for(i in seq(1, iter)){
+    print(i)
+    set.seed(i)
+    group <- data.frame(t(ps@otu_table)[rownames(data), ])
+    group$phenotype <- as.factor(ifelse(data$phenotype == 1, "A", "N"))
+    out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+    out
+    df_plot<- group[ , names(out$finalDecision[out$finalDecision == "Confirmed" | out$finalDecision == "Tentative"]), drop = F]
+    imp <- c(imp, colnames(df_plot))
+  }
+  df_plot <- data.frame(t(ps@otu_table)[rownames(data), ])
+  #keep <- names(table(imp))[table(imp) > 25]
+  #df_plot<- group[, keep, drop = F]
+  df_plot$phenotype <- as.factor(ifelse(data$phenotype == 1, "A", "N"))
+  return(list(df_plot= df_plot, imp = imp))
+}
+
+keepMostImp <- function(df_plot,imp,num){
+  phenotype <- df_plot$phenotype
+  keep <- names(table(imp))[table(imp) > num]
+  df_plot <- df_plot[, keep, drop = F]
+  df_plot$phenotype <- phenotype
+  return(df_plot)
+}
+```
+
+
+```{r, fig.width=11}
+asd_color <- "#01898D"
+td_color <- "#67A102"
+
+
+iter = 10
+thresh = iter/5
+# group 2: 
+res2_mbx <- getImportantFactors(ps_mbx, data2, iter = iter)
+#saveRDS(res2_mbx, "../results/latent_variable_modeling/phenotype_diff_res_mbx_group2.rds")
+#res2_mbx <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mbx_group2.rds")
+table(res2_mbx$imp)
+df_plot <- keepMostImp(res2_mbx$df_plot, res2_mbx$imp, thresh)
+#df_plot$age <- as.numeric(unlist(ps_metabol@sam_data[rownames(res2_mbx$df_plot), "age"]))
+#df_plot$dietary_supplement <- unlist(ps_metabol@sam_data[rownames(res2_mbx$df_plot), "dietary_supplement"])
+p2 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") +
+  geom_jitter(width = 0.02) + 
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Within cluster 2, high in topic 3, high in bile acids, low in dietary fat") +
+  facet_wrap(~variable, scales = 'free', ncol = 3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5))) +
+  theme_bw()+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mbx_cluster2_diff.pdf", p2, width = 8, height= 6)
+
+# Check correlation with age, not age correlated!
+#cor_tests<- apply(df_plot %>% select(-c("phenotype", "age")), 2, function(x) return(cor.test(x, df_plot$age,method = "spearman")))
+#lapply(cor_tests, function(x) return(x$p.value))
+
+res1_mbx <- getImportantFactors(ps_mbx, data1, iter= iter)
+#saveRDS(res1_mbx, "../results/latent_variable_modeling/phenotype_diff_res_mbx_group1.rds")
+#res1_mbx <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mbx_group1.rds")
+table(res1_mbx$imp)
+df_plot <- keepMostImp(res1_mbx$df_plot, res1_mbx$imp, thresh)
+#df_plot$vitamin_B <- ps_metabol@sam_data[rownames(df_plot), ]$vitamin_B
+#tests <- apply(df_plot %>% select(-c("phenotype", "vitamin_B")), 2, function(x) return(cor.test(x, df_plot$vitamin_B)))
+#lapply(tests, function(x) return(x$p.value))
+
+
+# supplements
+#ps <- readRDS("../data/ps_not_norm_age_filter_complete_family.rds")
+#supps <- ps@sam_data[,grepl("supplement", colnames(ps@sam_data)) | grepl("Supplement", colnames(ps@sam_data))]
+#rownames(supps)<- ps@sam_data$Biospecimen.Name
+#only supplement that is actually filled out it vitaminB
+#keep <- apply(df_plot, 2, function(x) return(sum(!is.na(x))> 30))
+#colnames(supp)[keep]
+ 
+# check correlation with age
+pvals <- apply(df_plot %>% select(-c("phenotype")), 2, function(x){
+  cor.test(as.numeric(x), as.numeric(ps_metabol_filt@sam_data[rownames(df_plot), ]$age), method = "spearman")$p.value
+})
+sum(pvals < .05)
+
+
+colnames(df_plot) <- gsub("metabolite", "\nmetabolite", colnames(df_plot))
+colnames(df_plot) <- gsub("\\.sulfate", "\nsulfate", colnames(df_plot))
+colnames(df_plot) <- gsub("lactate", "\nlactate", colnames(df_plot))
+df_plot <- df_plot[ , !colnames(df_plot) == "X3..4.hydroxyphenyl.\nlactate..HPLA."]
+df_plot <- df_plot[ , !colnames(df_plot) == "pyridoxal"]
+p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") +
+  geom_jitter(width = 0.08) +
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    ggtitle("") +
+  facet_wrap(~variable, scales = 'free', ncol=2) +  
+    scale_y_continuous(expand = expansion(mult = c(0, 0.5))) + theme_bw()+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mbx_cluster1_diff.pdf", p1, width = 5.5, height = 11)
+
+
+
+#
+res3_mbx <- getImportantFactors(ps_mbx, data3, iter= iter)
+df_plot <- keepMostImp(res3_mbx$df_plot, res3_mbx$imp, thresh)
+p3 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") +
+  geom_jitter(width = 0.08) +
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    ggtitle("") +
+  facet_wrap(~variable, scales = 'free', ncol=2) +  
+    scale_y_continuous(expand = expansion(mult = c(0, 0.5))) + theme_bw()+
+  scale_fill_manual(values = c(asd_color, td_color))
+
+
+# LCFA different between phenotypes
+#samples <- rownames(res2_mbx$df_plot)
+#df <- data.frame(t(ps_metabol@otu_table))
+
+#df$phenotype <- ps_metabol@sam_data$phenotype
+#df$gi <- ps_metabol@sam_data$GI_issues_this_week
+
+#keep <- sapply(paste0("C", seq(12,18)), function(x){
+#  return(grepl(x, colnames(df)) & (grepl("oate", colnames(df))))
+#})
+#keep <- apply(keep, 1, function(x) return(sum(x) > 0))
+#df_plot <- df[samples, keep]
+##df_plot$phenotype <- df[samples, ]$phenotype
+#p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+#    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") +
+#  geom_jitter(width = 0.08) +
+#  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+
+#  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#    ggtitle("") +
+#  facet_wrap(~variable, scales = 'free', ncol=2) +  
+#    scale_y_continuous(expand = expansion(mult = c(0, 0.5))) + theme_bw()+
+#  scale_fill_manual(values = c(asd_color, td_color))
+#p1
+```
+
+
+# MTG: differ between groups
+```{r, fig.width = 12}
+
+iter = 25
+thresh = iter/4
+#res2_mtg <- getImportantFactors(ps_mtg_filt, data2, iter = iter)
+#saveRDS(res2_mtg, "../results/latent_variable_modeling/phenotype_diff_res_mtg_group2.rds")
+res2_mtg <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mtg_group2.rds")
+table(res2_mtg$imp)
+df_plot <- keepMostImp(res2_mtg$df_plot, res2_mtg$imp, thresh)
+#rename
+if(ncol(df_plot) > 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- as.character(ps_mtg_filt@tax_table[ old_names , 2])
+  colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
+  colnames(df_plot) <- sub(" ", "\n", colnames(df_plot))
+p2 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Within cluster 2") + facet_wrap(~variable, scales = 'free') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mtg_cluster2_diff.pdf", p2, width = 9.25)
+}
+
+
+
+#res1_mtg <- getImportantFactors(ps_mtg_filt, data1, iter = iter)
+#saveRDS(res1_mtg, "../results/latent_variable_modeling/phenotype_diff_res_mtg_group1.rds")
+res1_mtg <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mtg_group1.rds")
+table(res1_mtg$imp)
+df_plot <- keepMostImp(res1_mtg$df_plot, res1_mtg$imp, thresh)
+#rename
+if(ncol(df_plot)> 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- as.character(ps_mtg_filt@tax_table[ old_names , 2])
+  colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
+  colnames(df_plot) <- sub("\\[", "\n[", colnames(df_plot))
+  colnames(df_plot) <- sub("ATP", "\nATP", colnames(df_plot))
+  colnames(df_plot) <- sub("formyltransferase", "\nformyltransferase",colnames(df_plot))
+  
+  df_plot <- df_plot[ , !colnames(df_plot) == "P-type Cu2+ transporter \n[EC:7.2.2.9] K01533"]
+p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+    stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+    ggtitle("Within cluster 1") + facet_wrap(~variable, scales = 'free') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mtg_cluster1_diff.pdf", p1, width = 9.25, height = 2.5)
+}
+
+df_plot_mtg<- df_plot
+
+```
+
+
+# MTT: differ between groups
+```{r}
+
+iter = 25
+thresh = iter/4
+#res2_mtt <- getImportantFactors(ps_mtt_filt, data2, iter = iter)
+#saveRDS(res2_mtt, "../results/latent_variable_modeling/phenotype_diff_res_mtt_group2.rds")
+res2_mtt <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mtt_group2.rds")
+table(res2_mtt$imp)
+df_plot <- keepMostImp(res2_mtt$df_plot, res2_mtt$imp, thresh)
+#rename
+if(ncol(df_plot) > 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- as.character(ps_mtt_filt@tax_table[ old_names , 2])
+  colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
+  colnames(df_plot) <- sub(" ", "\n", colnames(df_plot))
+p2 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    ggtitle("Within cluster 2") + facet_wrap(~variable, scales = 'free') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mtt_cluster2_diff.pdf", p2, width = 2.75, height = 2.5)
+}
+
+
+#res1_mtt <- getImportantFactors(ps_mtt_filt, data1, iter = iter)
+#saveRDS(res1_mtt, "../results/latent_variable_modeling/phenotype_diff_res_mtt_group1.rds")
+res1_mtt <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_mtt_group1.rds")
+table(res1_mtt$imp)
+df_plot <- keepMostImp(res1_mtt$df_plot, res1_mtt$imp, thresh)
+
+
+# Add in mtg df plot so everything is the same size
+
+
+#rename
+if(ncol(df_plot)> 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- as.character(ps_mtt_filt@tax_table[ old_names , 2])
+  colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
+  #colnames(df_plot) <- sub(" ", "\n", colnames(df_plot))
+  colnames(df_plot) <- sub("transport", "transport\n", colnames(df_plot))
+  colnames(df_plot) <- sub("\\[", "\n[", colnames(df_plot))
+p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    ggtitle("Within cluster 1") + facet_wrap(~variable, scales = 'free') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mtt_cluster1_diff.pdf", p1, width = 3.7, height = 1.5)
+}
+
+
+```
+
+# Combine MTG and MTT results in cluster 1
+```{r}
+ df_plot <- cbind(df_plot, df_plot_mtg %>% select(-c("phenotype")))
+p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+  stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+
+  theme_bw() + theme(axis.text.x = element_text( vjust = 0.5, hjust=1)) +
+  ggtitle("Within cluster 1") + facet_wrap(~variable, scales = 'free', ncol = 4) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+  scale_fill_manual(values = c(asd_color, td_color))
+ggsave("../results/latent_variable_modeling/mtg_mtt_cluster1_diff.pdf", p1, width = 9.6, height = 2)
+```
+
+# 16s: differ between groups 
+```{r}
+ 
+iter = 25
+thresh = iter/4
+#res2_16s <- getImportantFactors(ps_16s, data2, iter = iter)
+#saveRDS(res2_16s, "../results/latent_variable_modeling/phenotype_diff_res_16s_group2.rds")
+res2_16s <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_16s_group2.rds")
+table(res2_16s$imp)
+df_plot <- keepMostImp(res2_16s$df_plot, res2_16s$imp, thresh)
+if(ncol(df_plot) > 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- paste(as.character(ps_16s@tax_table[old_names, 2]),
+                           as.character(ps_16s@tax_table[old_names, 6]),
+                           as.character(ps_16s@tax_table[old_names, 8]))
+  colnames(df_plot) <- c(new_names,"phenotype")
+  colnames(df_plot) <- sub(" ", "\n", colnames(df_plot))
+  p2 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") + geom_jitter(width = 0.02) + 
+    stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() +theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    ggtitle("Within cluster 2") + facet_wrap(~variable, scales = 'free') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+    scale_fill_manual(values = c(asd_color, td_color))
+    ggsave("../results/latent_variable_modeling/16s_cluster2_diff.pdf", p2, width = 11)
+
+}
+
+#res1_16s <- getImportantFactors(ps_16s, data1, iter = iter)
+#saveRDS(res1_16s, "../results/latent_variable_modeling/phenotype_diff_res_16s_group1.rds")
+res1_16s <- readRDS("../results/latent_variable_modeling/phenotype_diff_res_16s_group1.rds")
+table(res1_16s$imp)
+df_plot <- keepMostImp(res1_16s$df_plot, res1_16s$imp, thresh)
+if(ncol(df_plot) > 1){
+  old_names <- colnames(df_plot %>% select(-c("phenotype")))
+  new_names <- paste(as.character(ps_16s@tax_table[old_names, 2]),
+                           as.character(ps_16s@tax_table[old_names, 6]),
+                           as.character(ps_16s@tax_table[old_names, 8]))
+  colnames(df_plot) <- c(new_names,"phenotype")
+  colnames(df_plot) <- sub(" ", "\n", colnames(df_plot))
+  df_plot <- df_plot[, ! (colnames(df_plot) %in% c("Firmicutes\nAnaerostipes hadrus", "Firmicutes\nNA NA", "Firmicutes\nRoseburia intestinalis", "Firmicutes\nGCA-900066575 NA" ))]
+  colnames(df_plot) <- gsub("_group NA", "", colnames(df_plot))
+  p1 <- ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+    geom_boxplot(outlier.alpha = 0.5, outlier.color = "grey") +  geom_jitter(width = 0.02) + 
+    stat_compare_means(aes(label=paste("p = ", ..p.adj..)), method = "wilcox.test", size = 3.5)+     theme_bw() +theme(axis.text.x = element_text(vjust = 0.5, hjust=1)) +
+    ggtitle("Within cluster 1") + facet_wrap(~variable, scales = 'free', ncol = 4) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.5)))+
+    scale_fill_manual(values = c(asd_color, td_color))
+    ggsave("../results/latent_variable_modeling/16s_cluster1_diff.pdf", p1, width = 9.6, height = 2)
+
+}
+```
+
+
+# Are non-carnitine associated LCFA enriched in ASD stool?
+```{r}
+set.seed(1)
+group <- data.frame(t(ps_metabol@otu_table)[rownames(data2), ])
+group$phenotype <- as.factor(ifelse(data2$phenotype == 1, "A", "N"))
+out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+out
+df_plot<- group[ , names(out$finalDecision[out$finalDecision == "Confirmed" | out$finalDecision == "Tentative" ]), drop = F]
+df_plot$phenotype <- group$phenotype
+ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "wilcox.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Within cluster 2, high in topic 3, high in bile acids, low in dietary fat") + facet_wrap(~variable, scales = 'free') + scale_y_continuous(expand = expansion(mult = c(0, 0.5))) + theme_bw()
+
+
+lcfa <- c("myristo", "palmito", "oleo", "linoleo")
+lcfa <- taxa_names(ps_metabol)[unlist(sapply(lcfa, function(x) return(grep(x, taxa_names(ps_metabol)))))]
+lcfa <- lcfa[!grepl("carnitine", lcfa)]
+
+
+#lcfa <- c("myristoleate (14:1n5)", "1-myristoylglycerol (14:0)",
+#          "palmitoleate (16:1n7)", "N-palmitoylglycine",
+#          "2-oleoylglycerol (18:1)", 
+#          "1-linoleoylglycerol (18:2)" , "2-linoleoylglycerol (18:2)" )
+
+df <- data.frame(t(ps_metabol@otu_table[lcfa, ]))
+df$phenotype <- ps_metabol@sam_data$phenotype
+df$sample_name <- ps_metabol@sam_data$host_name
+df <- melt(df)
+#df <- df %>% group_by(phenotype, sample_name) %>% summarize(value = sum(value))
+
+ggplot(df, aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "wilcox.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Within cluster 2, high in topic 3, high in bile acids, low in dietary fat") + scale_y_continuous(expand = expansion(mult = c(0, 0.5))) + theme_bw() 
+
+# Not exactly, but hard to get the right set of LCFA - the topic1 is pretty convincing
+
+
+
+
+# Gender split in group 2
+group <- data.frame(ps_metabol@sam_data[rownames(data2), ])
+sum(group$phenotype == "A" & group$sex == 1) / sum(group$phenotype == "A") # 20% ofthe ASD cases are female
+
+group <- data.frame(ps_metabol@sam_data[rownames(data1), ])
+sum(group$phenotype == "A" & group$sex == 1) / sum(group$phenotype == "A") # 5% ofthe ASD cases are female
+
+group <- data.frame(ps_metabol@sam_data)
+sum(group$phenotype == "A" & group$sex == 1) / sum(group$phenotype == "A")
+
+```
+
+
+# META: differences in phenotype within clusters
+```{r, fig.width = 10}
+control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "probiotic", "csection", "vitamin_B", "vitamin_D")
+
+meta <- as.data.frame(ps_mtg@sam_data[rownames(data2), control_variables])
+tmp <- apply(meta, 2, function(x){
+  if("True" %in% x){
+    x <- as.logical(x)
+  }
+  x <- as.numeric(x)
+  return(x / sd(x, na.rm = T))
+} )
+tmp <- data.frame(tmp)
+rownames(tmp) <- rownames(meta)
+phen <- data.frame('phenotype' = ps_mtg@sam_data[rownames(data2), 'phenotype'])
+pheatmap(tmp, annotation_row = phen, main = "Phenotypes don't cluster by diet - group 2")
+
+#analytical version
+group = tmp
+group$phenotype <- as.factor(ifelse(data2$phenotype == 1, "A", "N"))
+keep <- apply(group, 1, function(x) return(sum(is.na(x)) == 0))
+group <- group[keep, ]
+out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+out
+df_plot<- group[ , names(out$finalDecision[out$finalDecision == "Confirmed" | out$finalDecision == "Tentative" ]), drop = F]
+df_plot$phenotype <- group$phenotype
+ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "wilcox.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Within cluster 2") + facet_wrap(~variable, scales = 'free') + scale_y_continuous(expand = expansion(mult = c(0, 0.5)))
+
+
+
+
+
+
+meta <- as.data.frame(ps_mtg@sam_data[rownames(data1), control_variables])
+tmp <- apply(meta, 2, function(x){
+  if("True" %in% x){
+    x <- as.logical(x)
+  }
+  x <- as.numeric(x)
+  return(x / sd(x, na.rm = T))
+} )
+tmp <- data.frame(tmp)
+rownames(tmp) <- rownames(meta)
+phen <- data.frame('phenotype' = ps_mtg@sam_data[rownames(data1), 'phenotype'])
+pheatmap(tmp, annotation_row = phen, main = "Phenotypes don't cluster by diet - group 1")
+
+group = tmp
+group$phenotype <- as.factor(ifelse(data2$phenotype == 1, "A", "N"))
+keep <- apply(group, 1, function(x) return(sum(is.na(x)) == 0))
+group <- group[keep, ]
+out <- Boruta(group %>% select(-c("phenotype")), group$phenotype)
+out
+df_plot<- group[ , names(out$finalDecision[out$finalDecision == "Confirmed" | out$finalDecision == "Tentative" ]), drop = F]
+df_plot$phenotype <- group$phenotype
+ggplot(melt(df_plot, id.vars = c("phenotype")), aes(x = phenotype, y = log(value), fill = phenotype)) +
+  geom_boxplot() + stat_compare_means(aes(label=..p.adj..), method = "wilcox.test")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Within cluster 1") + facet_wrap(~variable, scales = 'free') + scale_y_continuous(expand = expansion(mult = c(0, 0.5)))
+
+
+```
+
+# Visualize behavior of ASD in each group
+```{r}
+meta <- read.csv("~/Lab/M3/data/all_meta_data.csv")
+meta <- meta[ , c("Language.ability.and.use..Biospecimen.", 
+"Conversation.ability..Biospecimen.",'Understands.speech..Biospecimen.',
+'Plays.imaginatively.when.alone..Biospecimen.',
+'Plays.imaginatively.with.others..Biospecimen.',
+'Plays.in.a.group.with.others..Biospecimen.',
+'Eye.contact.finding..Biospecimen.',
+'Childhood.behavioral.development.finding..Biospecimen.', 'Repetitive.motion..Biospecimen.', 'Picks.up.objects.to.show.to.others..Biospecimen.', 'Sleep.pattern.finding..Biospecimen.', 'Response.to.typical.sounds..Biospecimen.', 'Self.injurious.behavior.finding..Biospecimen.', 'Gastrointestinal.problems..M3...Biospecimen.', 'Imitation.behavior..Biospecimen.', 'Biospecimen.Name')]
+colnames(meta) <- gsub("\\.\\.\\.Biospecimen.", "", colnames(meta))
+colnames(meta) <- gsub("\\.\\.Biospecimen.", "", colnames(meta))
+colnames(meta) <- gsub("\\.\\.Biospecimen.", "", colnames(meta))
+
+phenotypes <- meta[!is.na(meta$Language.ability.and.use), ]
+
+language <- list("Able to speak fluently" = 0, "Phrase speech" = 1, "Single word speech" = 2, "Little to no speech" = 3)
+conversation <- list("Able to have conversation" = 0, "Difficulty with conversation" = 2,"Limited conversation ability" = 3, "Cannot have a conversation" = 4)
+speech <- list("Understands nearly all words"  = 0, "Understands most words" = 1, "Understands many words" = 2, "Understands about half of words" = 3, "Understands few or no words"  = 4)
+timing <- list("Regularly" = 0, "Sometimes" = 1, "Rarely" = 2, "Never" = 3, "No opportunity to play with other children" = NA)
+eye_contact <- list("Consistent eye contact"=0, "Some eye contact"=1, "Little or no eye contact" = 2)
+rep_motion <- list("Never" = 0, "Sometimes" = 1, "Regularly" = 2)
+#development scale is not clearly ordered
+sleep <- list("Healthy sleep pattern" = 0, "Some sleep difficulties" = 1, "Constant sleep difficulties" = 2)
+sounds <- list("Not bothered by typical sounds" = 0, "Sensitive to typical sounds" = 1, "Highly sensitive to typical sounds" = 2 )
+self_harm <- list("No self-injurious behavior" = 0 , "Mild self-harming behavior" = 1, "Dangerous or frequent self-harming behavior" =2)
+gi <- list("No issues" = 0, "Sometimes" = 1, "Continuous" = 2)
+imitate <- list("Imitates actions or gestures of others" = 0, "Imitates others when prompted" = 1, "Does not imitate others" =2)
+
+phenotypes_numeric <- phenotypes
+phenotypes_numeric$host_name <- phenotypes$Biospecimen.Name
+phenotypes_numeric$language <- unlist(language[phenotypes$Language.ability.and.use])
+phenotypes_numeric$conversation <- unlist(conversation[phenotypes$Conversation.ability])
+phenotypes_numeric$speech <- unlist(speech[phenotypes$Understands.speech])
+phenotypes_numeric$play_imagine_alone <- unlist(timing[phenotypes$Plays.imaginatively.when.alone])
+phenotypes_numeric$play_imagine_others <- unlist(timing[phenotypes$Plays.imaginatively.with.others])
+phenotypes_numeric$play_group_others <- unlist(timing[phenotypes$Plays.in.a.group.with.others])
+phenotypes_numeric$eye_contact <- unlist(eye_contact[phenotypes$Eye.contact.finding])
+phenotypes_numeric$repetitive_motion <- unlist(rep_motion[phenotypes$Repetitive.motion])
+phenotypes_numeric$shows_objects_others <- unlist(timing[phenotypes$Picks.up.objects.to.show.to.others])
+phenotypes_numeric$sleep <- unlist(sleep[phenotypes$Sleep.pattern.finding])
+phenotypes_numeric$sounds <- unlist(sounds[phenotypes$Response.to.typical.sounds])
+phenotypes_numeric$self_harm <- unlist(self_harm[phenotypes$Self.injurious.behavior.finding])
+phenotypes_numeric$gi <- unlist(gi[phenotypes$Gastrointestinal.problems..M3])
+phenotypes_numeric$imitate_behavior <- unlist(imitate[phenotypes$Imitation.behavior])
+phenotypes_numeric <- phenotypes_numeric %>% select(c("host_name","language", "conversation", "speech", "play_imagine_alone", "play_imagine_others",
+                                "play_group_others", "eye_contact", "repetitive_motion", "shows_objects_others", "sleep",
+                                "sounds", "self_harm", "gi", "imitate_behavior")) #14
+
+
+phenotypes_numeric <- phenotypes_numeric[!duplicated(phenotypes_numeric$host_name), ]
+rownames(phenotypes_numeric) <- phenotypes_numeric$host_name
+phenotypes_numeric <- phenotypes_numeric %>% select(-c("host_name"))
+phenotypes_numeric <- data.frame(apply(phenotypes_numeric, 2, function(x) return(( (x - mean(x, na.rm = T)) / var(x, na.rm = T)))))
+
+phenotypes_group2 <- phenotypes_numeric[rownames(data2)[data2$phenotype == 1], ]
+phenotypes_group2$group = rep(2, nrow(phenotypes_group2))
+phenotypes_group1 <- phenotypes_numeric[rownames(data1)[data1$phenotype == 1], ]
+phenotypes_group1$group = rep(1, nrow(phenotypes_group1))
+df <- data.frame(rbind(phenotypes_group2, phenotypes_group1))
+df <- df[apply(df, 1, function(x){ return(sum(x> 2) == 0)}), ]
+df <- na.omit(df)
+phen <- data.frame('cluster' = df$group)
+rownames(phen) <- rownames(df)
+df <- df %>% select(-c("group"))
+
+pheatmap(df, annotation_row = phen)
+```
+
+
+
+
+
+
+# Resilience - is there a more even distribution of topics across NT than ASD?
+# How else do people measure resilience?
+```{r}
+
+
+```
+
+
+# Differential analysis per group
+```{r}
+
+filterByPrevalence <- function(ps, filter_thresh){
+  data <- ps@otu_table
+  if(taxa_are_rows(ps)){
+    keep <- apply(data, 1, function(x) return(sum(x>0) > filter_thresh*nsamples(ps)))
+    data <- data[keep, ]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = T), sample_data(ps@sam_data), tax_table(ps@tax_table))
+  }else{
+    keep <- apply(data, 2, function(x) return(sum(x > 0)> filter_thresh*nsamples(ps)))
+    data <- data[ , keep]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = F), sample_data(ps@sam_data), tax_table(ps@tax_table))
+  }
+  return(ps_new)
+}
+
+getDifferentialAbundance <- function(ps, data){
+  data_use <- data.frame(t(ps@otu_table)[rownames(data), ])
+  phenotype <- ps@sam_data[rownames(data), ]$phenotype
+  res <- apply(data_use, 2, function(x) {
+    aut <- x[phenotype == "A"]
+    nt <- x[phenotype == "N"]
+    test <- suppressWarnings(wilcox.test(aut, nt))
+    return(test)
+  })
+  pvals <- unlist(lapply(res, function(x) return(x$p.value)))
+  print(sum(pvals < .05))
+  p_adj <- p.adjust(pvals, method = "fdr")
+  print(sum(p_adj < .05))
+  return(res)
+}
+
+ps_metabol_filt <- filterByPrevalence(ps_metabol, filter_thresh = 0.1)
+res_mbx_1 <- getDifferentialAbundance(ps_metabol_filt, data1)
+res_mbx_2 <- getDifferentialAbundance(ps_metabol_filt, data2)
+
+ps_mtt_filt <- filterByPrevalence(ps_mtt, filter_thresh = 0.4)
+res_mtt_1 <- getDifferentialAbundance(ps_mtt_filt, data1)
+res_mtt_2 <- getDifferentialAbundance(ps_mtt_filt, data2)
+
+ps_mtg_filt <- filterByPrevalence(ps_mtg, filter_thresh = 0.1)
+res_mtg_1 <- getDifferentialAbundance(ps_mtg_filt, data1)
+res_mtg_2 <- getDifferentialAbundance(ps_mtg_filt, data2)
+
+ps_16s_filt <- filterByPrevalence(ps_16s, filter_thresh = 0.15)
+res_16s_1 <- getDifferentialAbundance(ps_16s_filt, data1)
+res_16s_2 <- getDifferentialAbundance(ps_16s_filt, data2)
+```
+
+
+# Random Forest Code
+```{r}
+
+# Function to return the auc and performance object given a model and data
+getPerformanceModel <- function(model, data){
+  OOB.votes <- predict(model, data %>% select(-c('phenotype')), type="prob");
+  pred_votes <-  OOB.votes[,2]
+  names(pred_votes) <- rownames(OOB.votes)
+  pred.obj <- prediction(pred_votes, data[names(pred_votes), ]$phenotype)
+  roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+  auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+  return(list(roc_perf = roc_perf, auc = auc_roc))
+}
+getPerformance <- function(data, folds_by_family, mtry, ntrees){
+  data$phenotype <- as.factor(data$phenotype)
+    
+  perf <- lapply(seq(1, length(folds_by_family)), function(i){
+    training_ids = folds_by_family[[i]]
+    training <- data[training_ids, ]
+    validation <- data[-training_ids, , drop = F]
+    
+    rf <- randomForest(phenotype ~., data = training,
+                                mtry = mtry,
+                                metric = "Accuracy",
+                                ntree = ntrees,
+                                importance = T)
+  
+      
+    result_training <- getPerformanceModel(rf, training)
+    probs <- predict(rf, validation %>% select(-c('phenotype')), type = "prob")
+    names(probs) <- rownames(validation)
+    #result_validation <- getPerformanceModel(rf, validation)
+    return(list(result_training= result_training, result_validation = probs[, 1], validation_names = rownames(validation), model = rf))
+  })
+  return(perf)
+}
+
+```
+
+# 3 topic classify
+```{r}
+set.seed(3)
+folds_by_phenotype <- createFolds(data1$phenotype, k = nrow(data1), returnTrain = T)
+perf <- getPerformance(data1, folds_by_phenotype, mtry = 6, ntrees = 1000)
+probs <- unlist(lapply(perf, function(x){return (x$result_validation)}))
+validation_names <- unlist(lapply(perf, function(x){return(x$validation_names)}))
+pred.obj <- prediction(probs, data1[validation_names, ]$phenotype)
+roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+plot(roc_perf)
+auc_roc
+```
+
+
+# Load topic models 30 topics
+```{r}
+model_16s <- readRDS("../results/topic_modeling/model_16s_30topics_10000iter_5filter.rds")
+model_metabol <- readRDS("../results/topic_modeling/model_metabol_30topics_10000iter_10filter.rds")
+```
+
+# 30 topic model prediction, combined
+```{r}
+data_16s <- data.frame(model_16s@gamma)
+rownames(data_16s) <- sample_names(ps_16s)
+colnames(data_16s) <- paste0("topic_16s", seq(1, ncol(data_16s)))
+data_16s$phenotype <- as.factor(ps_16s@sam_data$phenotype)
+
+data_mbx <- data.frame(model_metabol@gamma)
+rownames(data_mbx) <- sample_names(ps_metabol)
+colnames(data_mbx) <- paste0("topic_mbx", seq(1, ncol(data_mbx)))
+
+#samples <- intersect(rownames(data_16s), rownames(data_mbx))
+samples <- rownames(data1)
+data_16s <- data_16s[samples, ]
+data_mbx <- data_mbx[samples, ]
+data <- cbind(data_16s, data_mbx)
+
+set.seed(3)
+for(i in seq(1, ncol(data), 3)){
+  folds_by_phenotype <- createFolds(data$phenotype, k = nrow(data), returnTrain = T)
+  perf <- getPerformance(data, folds_by_phenotype, mtry = i, ntrees = 1000)
+  probs <- unlist(lapply(perf, function(x){return (x$result_validation)}))
+  validation_names <- unlist(lapply(perf, function(x){return(x$validation_names)}))
+  pred.obj <- prediction(probs, data[validation_names, ]$phenotype)
+  roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+  auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+  #plot(roc_perf)
+  print(auc_roc)
+
+}
+
+
+```
+# Plot group 1
+```{r}
+df_tmp <- data.frame(phenotype = data$phenotype, row.names = rownames(data))
+data_tmp <- data %>% select(-c("phenotype"))
+ps_tmp <- phyloseq(otu_table(as.matrix(data_tmp), taxa_are_rows = F), sample_data = sample_data(df_tmp))
+ps_tmp@sam_data$phenotype <- as.character(ps_tmp@sam_data$phenotype)
+ps_tmp@sam_data$color <- ifelse(ps_tmp@sam_data$phenotype == "A", "red", "blue")
+ord <- ordinate(ps_tmp, method = "DCA", distance = "manhattan")
+plot_ordination(ps_tmp, ord, color = "color", type = "samples")
+
+
+clusters <- kmeans(data %>% select(-c("phenotype")), centers = 8)
+sort(clusters$cluster)
+
+```
+
+
+# MBX classify group 1
+# Num Trees by performance
+```{r}
+set.seed(3)
+data <- data.frame(t(ps_metabol@otu_table)[rownames(data1), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data1), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+
+# Grab the first fold for benchmarking
+folds = 3
+fam_id <- unlist(sample_data(ps_mtg)[rownames(data), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = folds)
+
+for(i in seq(1, 3)){
+  training_ids = folds_by_family[[i]]
+  training <- data[training_ids, ]
+  validation <- data[-training_ids, ]
+  
+  num_trees_list <- seq(1, 1000, 10)
+  auc_list <- sapply(num_trees_list, function(num_trees){
+        rf <- randomForest(phenotype ~., data = training, ntree = num_trees, mtry = sqrt(ncol(data)), metric = "Accuracy", importance = F)
+        result_training <- getPerformanceModel(rf, training)
+        result_validation <- getPerformanceModel(rf, validation)
+        return(list(train_auc = result_training$auc, validate_auc = result_validation$auc))
+    })
+    
+  tmp <- data.frame(num_trees = num_trees_list, train_auc = unlist(auc_list['train_auc', ]), validate_auc = unlist(auc_list['validate_auc', ]))
+  tmp <- melt(tmp, id.vars = c('num_trees'))
+  p <- ggplot(tmp, aes(x = num_trees, y = value, color = variable)) + geom_line()
+  p
+  print(p)
+}
+
+#Conclusion: 1500 trees seems to be plenty for this task to stabilize
+#Optimal happens at only 50 trees
+```
+
+# Tree depth by performance
+```{r}
+set.seed(3)
+tree_depth_list <- seq(1, 60, 1)
+for(i in seq(1, 3)){
+  training_ids = folds_by_family[[i]]
+  training <- data[training_ids, ]
+  validation <- data[-training_ids, ]
+  
+  auc_list <- sapply(tree_depth_list, function(tree_depth){
+      print(tree_depth)
+      rf <- randomForest(phenotype ~., data = training, ntree = 1000, mtry = tree_depth, metric = "Accuracy", importance = F)
+      result_training <- getPerformanceModel(rf, training)
+      result_validation <- getPerformanceModel(rf, validation)
+      return(list(train_auc = result_training$auc, validate_auc = result_validation$auc, model = rf))
+  })
+  
+  tmp <- data.frame(tree_depth = tree_depth_list, train_auc = unlist(auc_list['train_auc', ]), validate_auc = unlist(auc_list['validate_auc', ]))
+  tmp <- melt(tmp, id.vars = c('tree_depth'))
+  p <- ggplot(tmp, aes(x = tree_depth, y = value, color = variable)) + geom_line() + geom_point()
+  print(p)
+}
+
+# We do see a general downward trend as we overfit
+# #best tree depth for this split is at:
+#tmp <- tmp[tmp$variable == "validate_auc", ]
+#best = tmp$value == max(tmp$value)
+
+#auc_list[, best]
+```
+# Official parameter search using training data, instead of graphs, now that we understand what's happening
+```{r}
+tree_depths <- seq(1, 60, 1)
+tunegrid <- expand.grid(.mtry= tree_depths) #mtry is the depth of each decision tree
+tune_res <- train(phenotype ~., 
+            data = training, 
+            method='rf', 
+            metric='Accuracy',
+            ntree = 1000,
+            tuneGrid=tunegrid, 
+            trControl=control)
+# Because we split by family, the OOB error is artificially increased. But the validation accuracy is high, so we're going to go with that for now
+```
+
+
+# Performance overall with selected parameters
+```{r}
+set.seed(3)
+perf <- getPerformance(data, folds_by_family, mtry = 4, ntrees = 1000)
+plot_objects <- lapply(perf, function(x) return(x$result_validation$roc_perf))
+auc_objects <- unlist(lapply(perf, function(x) return(x$result_validation$auc)))
+models <- lapply(perf, function(x) return(x$model))
+print(auc_objects)
+mean(auc_objects)
+```
+# Importance of variables. Think of the classifier prediction as a measure of how confident we are about the variable importance
+```{r}
+imp <- importance(models[[1]])
+metabolites1 <- as.data.frame(imp[order(imp[ , "MeanDecreaseGini"], decreasing = T), ])
+metabolites1$metabolite <- rownames(metabolites1)
+
+imp <- importance(models[[2]])
+metabolites2 <- as.data.frame(imp[order(imp[ , "MeanDecreaseGini"], decreasing = T), ])
+metabolites2$metabolite <- rownames(metabolites2)
+
+imp <- importance(models[[3]])
+metabolites3 <- as.data.frame(imp[order(imp[ , "MeanDecreaseGini"], decreasing = T), ])
+metabolites3$metabolite <- rownames(metabolites3)
+
+df <- data.frame(rbind(metabolites1, metabolites2, metabolites3))
+colnames(df) <- colnames(metabolites1)
+df <- df %>% group_by(metabolite) %>% summarize('MeanDecreaseGini' = mean(MeanDecreaseGini), 'MeanDecreaseAccuracy' = mean(MeanDecreaseAccuracy))
+
+View(df[order(df$MeanDecreaseGini, decreasing = T), ])
+View(df[order(df$MeanDecreaseAccuracy, decreasing = T), ])
+```
+
+# Importance of variables in just the first, well performing, fold
+```{r}
+View(metabolites1[order(metabolites1$MeanDecreaseAccuracy, decreasing = T), ])
+```
+
+# Carnitine transporter visualization anyway - group 1
+```{r, fig.height=10}
+getwd()
+data_mbx <- data
+metabolites <- metabolites1
+
+bili <- metabolites$metabolite[grep("bilirubin", metabolites$metabolite)]
+carnitine <- metabolites$metabolite[grep("carnitine", metabolites$metabolite)]
+
+to_plot <- data_mbx[ , bili]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+#Plot bilirubin
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() 
+
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() +
+  facet_wrap(~variable, scales = "free") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw()+
+  theme(strip.text = element_text(size = 13))
+# there's not less bilirubin, but there is less bilirubin degredation product, meaning production is fine, but degredation is messed up, so... but there is NOT too much bilirubin
+
+to_plot <- data_mbx[ , carnitine]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+# Plot carnitine
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("carnitine associated compounds") +
+  scale_y_log10() 
+
+p <- ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means(aes(label=..p.adj..), method = "wilcox") +
+  ggtitle("carnitine associated compounds") +
+  facet_wrap(~variable, ncol = 4, scales = 'free') +
+  scale_y_log10(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw() + theme(strip.text = element_text(size = 13))
+  
+p
+ggsave("../results/topic_modeling/carnitine_associated_diffs.pdf", p, height = 12)
+```
+
+
+
+
+# Carnitine transporter visualization anyway - group 2
+```{r, fig.height=10}
+set.seed(3)
+data <- data.frame(t(ps_metabol@otu_table)[rownames(data2), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data2), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+
+data_mbx <- data
+metabolites <- metabolites1
+
+bili <- colnames(data_mbx)[grep("bilirubin", colnames(data_mbx))]
+carnitine <- colnames(data_mbx)[grep("carnitine", colnames(data_mbx))]
+
+to_plot <- data_mbx[ , bili]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+#Plot bilirubin
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() 
+
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() +
+  facet_wrap(~variable, scales = "free") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw()+
+  theme(strip.text = element_text(size = 13))
+# there's not less bilirubin, but there is less bilirubin degredation product, meaning production is fine, but degredation is messed up, so... but there is NOT too much bilirubin
+
+to_plot <- data_mbx[ , carnitine]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+# Plot carnitine
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("carnitine associated compounds") +
+  scale_y_log10() 
+
+p <- ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means(aes(label=..p.adj..), method = "wilcox") +
+  ggtitle("carnitine associated compounds") +
+  facet_wrap(~variable, ncol = 4, scales = 'free') +
+  scale_y_log10(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw() + theme(strip.text = element_text(size = 13))
+  
+p
+ggsave("../results/topic_modeling/carnitine_associated_diffs.pdf", p, height = 20, width = 13)
+```
+
+
+# Carnitine transporter visualization anyway - all data
+```{r, fig.height=10}
+set.seed(3)
+data <- data.frame(t(ps_metabol@otu_table))
+data$phenotype <- ps_metabol@sam_data$phenotype
+data$phenotype <- as.factor(data$phenotype)
+
+data_mbx <- data
+
+bili <- colnames(data_mbx)[grep("bilirubin", colnames(data_mbx))]
+carnitine <- colnames(data_mbx)[grep("carnitine", colnames(data_mbx))]
+
+to_plot <- data_mbx[ , bili]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+#Plot bilirubin
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() 
+
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Bilirubin associated compounds") +
+  scale_y_log10() +
+  facet_wrap(~variable, scales = "free") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw()+
+  theme(strip.text = element_text(size = 13))
+# there's not less bilirubin, but there is less bilirubin degredation product, meaning production is fine, but degredation is messed up, so... but there is NOT too much bilirubin
+
+to_plot <- data_mbx[ , carnitine]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+
+# Plot carnitine
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("carnitine associated compounds") +
+  scale_y_log10() 
+
+p <- ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means(aes(label=..p.adj..), method = "wilcox") +
+  ggtitle("carnitine associated compounds") +
+  facet_wrap(~variable, ncol = 4, scales = 'free') +
+  scale_y_log10(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw() + theme(strip.text = element_text(size = 13))
+  
+p
+ggsave("../results/topic_modeling/carnitine_associated_diffs.pdf", p, height = 20, width = 13)
+```
+
+# Difference in citrate in group1
+```{r}
+data <- data.frame(t(ps_metabol@otu_table)[rownames(data1), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data1), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+data_mbx <- data
+citric <- colnames(data_mbx)[grep("citrate", colnames(data_mbx))]
+
+
+to_plot <- data_mbx[ , citric]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+ggplot(to_plot , aes(x = phenotype, y = log(value), fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Citrate compounds Group1 ") +
+  facet_wrap(~variable, scales = "free") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw()+
+  theme(strip.text = element_text(size = 13))
+
+
+
+data <- data.frame(t(ps_metabol@otu_table)[rownames(data2), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data2), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+data_mbx <- data
+citric <- colnames(data_mbx)[grep("citrate", colnames(data_mbx))]
+
+
+to_plot <- data_mbx[ , citric]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+
+ggplot(to_plot , aes(x = phenotype, y = log(value), fill = phenotype)) + geom_boxplot(outlier.alpha = 0) +  geom_jitter(width = 0.1)+
+  stat_compare_means() +
+  ggtitle("Citrate compounds Group2 ") +
+  facet_wrap(~variable, scales = "free") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme_bw()+
+  theme(strip.text = element_text(size = 13))
+```
+
+# Difference in fatp - no difference in transport
+```{r}
+fatp_gene_name <- "K06076"
+count <- ps_mtg@otu_table[fatp_gene_name, rownames(data1)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtg@sam_data[rownames(data1),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+fatp_gene_name <- "K06076"
+count <- ps_mtg@otu_table[fatp_gene_name, rownames(data2)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtg@sam_data[rownames(data2),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+
+
+
+fatp_gene_name <- "K06076"
+count <- ps_mtt@otu_table[fatp_gene_name, rownames(data1)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtt@sam_data[rownames(data1),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+fatp_gene_name <- "K06076"
+count <- ps_mtt@otu_table[fatp_gene_name, rownames(data2)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtt@sam_data[rownames(data2),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+```
+
+
+# Difference in synthesis - no difference in transport
+```{r}
+fatp_gene_name <- "K06076"
+count <- ps_mtg@otu_table[fatp_gene_name, rownames(data1)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtg@sam_data[rownames(data1),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+fatp_gene_name <- "K06076"
+count <- ps_mtg@otu_table[fatp_gene_name, rownames(data2)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtg@sam_data[rownames(data2),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+
+
+
+fatp_gene_name <- "K06076"
+count <- ps_mtt@otu_table[fatp_gene_name, rownames(data1)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtt@sam_data[rownames(data1),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+
+fatp_gene_name <- "K06076"
+count <- ps_mtt@otu_table[fatp_gene_name, rownames(data2)]
+df <- data.frame("fatp" = as.numeric(count), "phenotype" = ps_mtt@sam_data[rownames(data2),]$phenotype)
+ggplot(df, aes(x = phenotype, y = fatp)) + geom_boxplot() + stat_compare_means()
+```
+
+
+# fatty acid related genes
+```{r, fig.height=5}
+genes <- grepl("fatty acid", ps_mtg@tax_table[, 2])
+ps_mtg@tax_table[grepl("fatty acid", ps_mtg@tax_table[, 2]), 2]
+
+df <- data.frame(t(ps_mtg@otu_table[genes, ]))
+df$phenotype <- ps_mtg@sam_data$phenotype
+df <- melt(df, id.vars = ("phenotype"))
+ggplot(df, aes(x = phenotype, y = value)) + geom_boxplot() + facet_wrap(~variable, scales = "free") + stat_compare_means()
+ggplot(df, aes(x = phenotype, y = value)) + geom_boxplot() + stat_compare_means()
+
+
+
+genes <- grepl("fatty acid", ps_mtt@tax_table[, 2])
+ps_mtt@tax_table[grepl("fatty acid", ps_mtt@tax_table[, 2]), 2]
+
+df <- data.frame(t(ps_mtt@otu_table[genes, ]))
+df$phenotype <- ps_mtt@sam_data$phenotype
+df <- melt(df, id.vars = ("phenotype"))
+ggplot(df, aes(x = phenotype, y = value)) + geom_boxplot() + facet_wrap(~variable, scales = "free") + stat_compare_means()
+ggplot(df, aes(x = phenotype, y = value)) + geom_boxplot() + stat_compare_means()
+```
+
+
+# MTT classifier for group 1
+```{r}
+set.seed(3)
+data <- data.frame(t(ps_mtt_filt@otu_table)[rownames(data1), ])
+data$phenotype <- ps_mtt_filt@sam_data[rownames(data1), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+
+# Grab the first fold for benchmarking
+folds = 3
+fam_id <- unlist(sample_data(ps_mtt_filt)[rownames(data), 'familyID'])
+folds_by_phenotype <- createFolds(data$phenotype, k = folds)
+
+for(i in seq(1, 3)){
+  training_ids = folds_by_phenotype[[i]]
+  training <- data[training_ids, ]
+  validation <- data[-training_ids, ]
+  
+  num_trees_list <- seq(1, 1000, 50)
+  auc_list <- sapply(num_trees_list, function(num_trees){
+        print(num_trees, end = "\t")
+        rf <- randomForest(phenotype ~., data = training, ntree = num_trees, mtry = 10, metric = "Accuracy", importance = F)
+        result_training <- getPerformanceModel(rf, training)
+        result_validation <- getPerformanceModel(rf, validation)
+        return(list(train_auc = result_training$auc, validate_auc = result_validation$auc))
+    })
+    
+  tmp <- data.frame(num_trees = num_trees_list, train_auc = unlist(auc_list['train_auc', ]), validate_auc = unlist(auc_list['validate_auc', ]))
+  tmp <- melt(tmp, id.vars = c('num_trees'))
+  p <- ggplot(tmp, aes(x = num_trees, y = value, color = variable)) + geom_line()
+  p
+  print(p)
+}
+
+#Conclusion: 1500 trees seems to be plenty for this task to stabilize
+#Optimal happens at only 50 trees
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 30 topic ensemble
+```{r, fig.height =7, width = 3}
+# Classify using 16s
+training_ids = folds_by_family[[i]]
+training_16s <- data_16s[training_ids, ]
+validation_16s <- data_16s[-training_ids, ]
+rf_16s <- randomForest(phenotype ~., data = training_16s, ntree = 5, mtry = 3, metric = "Accuracy", importance = F)
+
+
+# Classify using MBX
+data_mbx$phenotype <- as.factor(ps_metabol@sam_data[samples, ]$phenotype)
+training_ids = folds_by_family[[i]]
+training_mbx <- data_mbx[training_ids, ]
+validation_mbx <- data_mbx[-training_ids, ]
+rf_mbx <- randomForest(phenotype ~., data = training_mbx, ntree = 5, mtry = 3, metric = "Accuracy", importance = F)
+
+#Training 
+prob_aut_16s <- predict(rf_16s, training_16s, type = "prob")[,1]
+prob_aut_mbx <- predict(rf_mbx, training_mbx, type = "prob")[,1]
+
+pheatmap(data.frame(prob_aut_16s, prob_aut_mbx))
+mapply(mean, prob_aut_16s, prob_aut_mbx)
+
+
+# Validation
+prob_aut_16s <- predict(rf_16s, validation_16s, type = "prob")[,1]
+prob_aut_mbx <- predict(rf_mbx, validation_mbx, type = "prob")[,1]
+pheatmap(data.frame(prob_aut_16s, prob_aut_mbx))
+
+  
+probs <- mapply(mean, prob_aut_16s, prob_aut_mbx) 
+pred.obj <- prediction(probs, validation_16s$phenotype)
+roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+plot(roc_perf)
+auc_roc
+```
+
+```{r}
+set.seed(3)
+tree_depth_list <- seq(1, 30, 1)
+for(i in seq(1, 3)){
+  training_ids = folds_by_family[[i]]
+  training <- data[training_ids, ]
+  validation <- data[-training_ids, ]
+  
+  auc_list <- sapply(tree_depth_list, function(tree_depth){
+      print(tree_depth)
+      rf <- randomForest(phenotype ~., data = training, ntree = 500, mtry = tree_depth, metric = "Accuracy", importance = F)
+      result_training <- getPerformanceModel(rf, training)
+      result_validation <- getPerformanceModel(rf, validation)
+      return(list(train_auc = result_training$auc, validate_auc = result_validation$auc, model = rf))
+  })
+  
+  tmp <- data.frame(tree_depth = tree_depth_list, train_auc = unlist(auc_list['train_auc', ]), validate_auc = unlist(auc_list['validate_auc', ]))
+  tmp <- melt(tmp, id.vars = c('tree_depth'))
+  p <- ggplot(tmp, aes(x = tree_depth, y = value, color = variable)) + geom_line() + geom_point()
+  print(p)
+}
+
+```
+
+# Use 16s data to classify, after subsetting into topic clusters
+```{r}
+data <- data.frame(t(ps_16s@otu_table)[rownames(data1), ])
+data$phenotype <- ps_16s@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+perf <- getPerformance(data, folds_by_family_1)
+plot_objects <- lapply(perf, function(x) return(x$result_validation$roc_perf))
+auc_objects <- unlist(lapply(perf, function(x) return(x$result_validation$auc)))
+print(auc_objects)
+mean(auc_objects)
+
+data <- data.frame(t(ps_16s@otu_table)[rownames(data2), ])
+data$phenotype <- ps_16s@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+perf <- getPerformance(data)
+plot_objects <- lapply(perf, function(x) return(x$result_validation$roc_perf))
+auc_objects <- unlist(lapply(perf, function(x) return(x$result_validation$auc)))
+print(auc_objects)
+mean(auc_objects)
+
+```
+
+
+# Use MBX data to classify, after subsetting into topic clusters
+```{r}
+set.seed(1)
+data <- data.frame(t(ps_metabol_filt@otu_table)[rownames(data1), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+folds <- createFolds(data$phenotype, k = 3, returnTrain = T)
+perf <- getPerformance(data, folds)
+plot_objects <- lapply(perf, function(x) return(x$result_validation$roc_perf))
+auc_objects <- unlist(lapply(perf, function(x) return(x$result_validation$auc)))
+models <- lapply(perf, function(x) return(x$model))
+print(auc_objects)
+mean(auc_objects)
+
+imp <- importance(models[[1]])
+metabolites <- imp[order(imp[ , "MeanDecreaseGini"], decreasing = T), ]
+metabolites[1:50, ]
+```
+
+# Importance of variables in metabolite classifier - it worked quite well for group 1
+```{r}
+set.seed(1)
+tree_depths <- round(seq(2, sqrt(ncol(data)), by = sqrt(ncol(data))/10))
+tunegrid <- expand.grid(.mtry= tree_depths) #mtry is the depth of each decision tree
+tune_res <- train(phenotype ~., 
+            data = data, 
+            method='rf', 
+            metric='Accuracy',
+            ntree = 1500,
+            tuneGrid=tunegrid, 
+            trControl=control)
+
+
+# get metabolite importance in separating classes
+rf <- randomForest(phenotype ~., data = data,
+                            mtry = 1,
+                            metric = "Accuracy",
+                            ntree = 1500,
+                            importance = T)
+
+
+imp <- importance(rf)
+metabolites <- imp[order(imp[ , "MeanDecreaseGini"], decreasing = T), ]
+metabolites[1:50, ]
+```
+
+```{r}
+
+bili <- names(metabolites)[grepl("bilirubin", names(metabolites))]
+carnitine <- names(metabolites)[grepl("carnitine", names(metabolites))]
+
+to_plot <- data_mbx[ , bili]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() + stat_compare_means() + ggtitle("Bilirubin associated compounds")
+
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() + stat_compare_means() + ggtitle("Bilirubin associated compounds") + facet_wrap(~variable) # there's not less bilirubin, but there is less bilirubin degredation product, meaning production is fine, but degredation is messed up, so... but there is NOT too much bilirubin
+
+to_plot <- data_mbx[ , carnitine]
+to_plot$phenotype <- data_mbx$phenotype
+to_plot <- melt(to_plot, id.vars = c("phenotype"))
+to_plot$phenotype <- as.factor(to_plot$phenotype)
+ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() + stat_compare_means() + ggtitle("carnitine associated compounds")
+
+p <- ggplot(to_plot , aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() +
+  stat_compare_means(aes(label=..p.adj..), method = "wilcox") + ggtitle("carnitine associated compounds") + facet_wrap(~variable, ncol = 4, scales = 'free') + scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+ggsave("carnitine_associated_diffs.pdf", p)
+```
+
+
+
+# MBX classifier data2
+```{r}
+data <- data.frame(t(ps_metabol@otu_table)[rownames(data2), ])
+data$phenotype <- ps_metabol@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+perf <- getPerformance(data)
+plot_objects <- lapply(perf, function(x) return(x$result_validation$roc_perf))
+auc_objects <- unlist(lapply(perf, function(x) return(x$result_validation$auc)))
+print(auc_objects)
+mean(auc_objects)
+
+```
+
+# metabolites can separate well, but not linearly. Let's not use linear classifier for interpretation after all. 
+```{r}
+phenotype <- data$phenotype
+data_use <- data %>% select(-c("phenotype"))
+data_use <- apply(data_use, 2, function(x) return( (x - mean(x)) / var(x)))
+fit <- cv.glmnet(as.matrix(data_use), phenotype, family = "binomial", data = data_use)
+plot(fit)
+fit$lambda.min
+fit$lambda.1se
+
+coefs <- as.matrix(coef(fit, s= 0.05))
+coefs[coefs !=0, ]
+
+
+```
+
+
+
+# Use ensemble votes data 1
+```{r}
+folds = 3
+fam_id <- unlist(sample_data(ps_mtg)[rownames(data1), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = folds)
+
+data_16s <- data.frame(t(ps_16s@otu_table)[rownames(data1), ])
+data_16s$phenotype <- ps_16s@sam_data[rownames(data_16s), ]$phenotype
+data_16s$phenotype <- as.factor(data_16s$phenotype)
+perf_16s <- getPerformance(data_16s, folds_by_family)
+model_16s <- perf_16s[[1]]$model
+
+data_mbx <- data.frame(t(ps_metabol@otu_table)[rownames(data1), ])
+data_mbx$phenotype <- ps_metabol@sam_data[rownames(data_mbx), ]$phenotype
+data_mbx$phenotype <- as.factor(data_mbx$phenotype)
+perf_mbx <- getPerformance(data_mbx, folds_by_family)
+model_mbx <- perf_mbx[[1]]$model
+
+
+
+probs_16s <- predict(model_16s, data_16s[-folds_by_family[[1]], ] %>% select(-c('phenotype')), type="prob")
+prob_16s <-  probs_16s[,2]
+
+probs_mbx <- predict(model_mbx, data_mbx[-folds_by_family[[1]], ] %>% select(-c('phenotype')), type="prob")
+prob_mbx <-  probs_mbx[,2]
+
+
+phenotype <- ps_16s@sam_data[rownames(data1)[-folds_by_family[[1]]], ]$phenotype
+phenotype <- ifelse(phenotype == "N", 1, 0)
+phenotype
+probs_ensemble <- mapply(median, as.numeric(prob_16s), as.numeric(prob_mbx))
+preds <- probs_ensemble > median(probs_ensemble)
+sum(preds == phenotype) / length(preds) #accuracy
+
+#plot ensemble performance
+pred.obj <- prediction(probs_ensemble, phenotype)
+roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+plot(roc_perf)  
+auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+auc_roc
+
+phenotype
+probs_ensemble
+
+imp <- importance(model_mbx )
+metabolites <- imp[order(imp[ , "MeanDecreaseAccuracy"], decreasing = T), ]
+metabolites[1:50, ]
+
+
+# when kids are eating fat, kids with ASD have way more carnitine associated fatty acids in their stool, which means that the TRANSPORTERS ARE NOT TAKING UP THE CARNITINE ASSCIATED FATTY ACIDS, they're remaining in the gut. In the kids that aren't eating fats, we don't seem accumulation of carnitine fatty acids in the stool, because there just aren't dietary fatty acids to begin with. This makes differentiating between them difficult. If we fed them fat, we would see accumulation in the stool as well, probably. This would mean that ASD phenotype is low in long chain fatty acids and all of their hydrolyzation products, including medium chain fatty acids. Also, those medium chain fatty acids that rely on carnitine wouldn't make it in either. They have plenty of carnitine though, so it's the transporters themselves
+
+```
+
+# Use ensemble votes data2
+```{r}
+folds = 3
+fam_id <- unlist(sample_data(ps_mtg)[rownames(data2), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = folds)
+
+data_16s <- data.frame(t(ps_16s@otu_table)[rownames(data2), ])
+data_16s$phenotype <- ps_16s@sam_data[rownames(data_16s), ]$phenotype
+data_16s$phenotype <- as.factor(data_16s$phenotype)
+perf_16s <- getPerformance(data_16s, folds_by_family)
+model_16s <- perf_16s[[1]]$model
+
+data_mbx <- data.frame(t(ps_metabol@otu_table)[rownames(data2), ])
+data_mbx$phenotype <- ps_metabol@sam_data[rownames(data_mbx), ]$phenotype
+data_mbx$phenotype <- as.factor(data_mbx$phenotype)
+perf_mbx <- getPerformance(data_mbx, folds_by_family)
+model_mbx <- perf_mbx[[1]]$model
+
+
+
+probs_16s <- predict(model_16s, data_16s[-folds_by_family[[1]], ] %>% select(-c('phenotype')), type="prob")
+prob_16s <-  probs_16s[,2]
+
+probs_mbx <- predict(model_mbx, data_mbx[-folds_by_family[[1]], ] %>% select(-c('phenotype')), type="prob")
+prob_mbx <-  probs_mbx[,2]
+
+
+phenotype <- ps_16s@sam_data[rownames(data2)[-folds_by_family[[1]]], ]$phenotype
+phenotype <- ifelse(phenotype == "N", 1, 0)
+phenotype
+probs_ensemble <- mapply(median, as.numeric(prob_16s), as.numeric(prob_mbx))
+preds <- probs_ensemble > median(probs_ensemble)
+sum(preds == phenotype) / length(preds) #accuracy
+
+#plot ensemble performance
+pred.obj <- prediction(probs_ensemble, phenotype)
+roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+plot(roc_perf)  
+auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+auc_roc #0.69
+
+phenotype
+probs_ensemble
+```
+
+
+
+
+```{r}
+library(caret)
+library(randomForest)
+data <- data.frame(t(ps_16s@otu_table)[rownames(data1), ])
+data$phenotype <- ps_16s@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+fam_id <- unlist(sample_data(ps_16s)[rownames(data), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = 3)
+training_ids = folds_by_family[[1]]
+training <- data[training_ids, ]
+validate <- data[-training_ids, ]
+
+#first, pick a tree depth
+control <- trainControl(method='repeatedcv', number=3, repeats=3)
+tree_depths <- round(seq(2, sqrt(ncol(data)), by = 10))
+tunegrid <- expand.grid(.mtry= tree_depths) #mtry is the depth of each decision tree
+rf <- train(phenotype ~., 
+            data = training, 
+            method='rf', 
+            metric='Accuracy', 
+            tuneGrid=tunegrid, 
+            trControl=control)
+plot(rf)
+
+plot_list <- list()
+for(mtry in c(10, 30, 50, 70)){
+  print(mtry)
+  num_trees_list <- seq(1, 2000, 100)
+  error_list <- sapply(num_trees_list, function(num_trees){
+      AR.classify <- randomForest(phenotype ~., data = training,
+                                  ntree = num_trees, mtry = 70,
+                                  metric = "Accuracy", 
+                                  importance = TRUE)
+      rf <- AR.classify
+      
+      # Train classify
+        OOB.votes <- predict(rf, training %>% select(-c('phenotype')), type="prob");
+        pred_votes <-  OOB.votes[,2]
+        names(pred_votes) <- rownames(OOB.votes)
+        pred.obj <- prediction(pred_votes, training[names(pred_votes), ]$phenotype)
+        roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+        training_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+  
+      
+      # Validation classify
+        OOB.votes <- predict(rf, validate %>% select(-c('phenotype')), type="prob");
+        pred_votes <-  OOB.votes[,2]
+        names(pred_votes) <- rownames(OOB.votes)
+        pred.obj <- prediction(pred_votes, validate[names(pred_votes), ]$phenotype)
+        roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+        validate_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+  
+      
+      return(list(train_error = training_auc_roc, validate_error = validate_auc_roc))
+  })
+  
+  tmp <- data.frame(num_trees = num_trees_list, train_error = unlist(error_list['train_error', ]), validate_error = unlist(error_list['validate_error', ]))
+  tmp <- melt(tmp, id.vars = c('num_trees'))
+  p <- ggplot(tmp, aes(x = num_trees, y = value, color = variable)) + geom_line()
+  p
+  plot_list[[mtry]] <- p
+}
+library(gridExtra)
+grid.arrange(grobs = plot_list)
+```
+
+# Revisit the original data now that we have broken things into clusters
+```{r}
+data <- data.frame(t(ps_16s@otu_table)[rownames(data2), ])
+data$phenotype <- ps_16s@sam_data[rownames(data), ]$phenotype
+data$phenotype <- as.factor(data$phenotype)
+fam_id <- unlist(sample_data(ps_16s)[rownames(data), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = 3)
+training_ids = folds_by_family[[1]]
+training <- data[training_ids, ]
+validate <- data[-training_ids, ]
+
+#first, pick a tree depth
+control <- trainControl(method='repeatedcv', number=3, repeats=3)
+tree_depths <- round(seq(2, sqrt(ncol(data)), by = 10))
+tunegrid <- expand.grid(.mtry= tree_depths) #mtry is the depth of each decision tree
+rf <- train(phenotype ~., 
+            data = training, 
+            method='rf', 
+            metric='Accuracy', 
+            tuneGrid=tunegrid, 
+            trControl=control)
+plot(rf)
+
+num_trees_list <- seq(1, 500, 50)
+error_list <- sapply(num_trees_list, function(num_trees){
+    AR.classify <- randomForest(phenotype ~., data = training,
+                                ntree = num_trees, mtry = sqrt(ncol(data)),
+                                metric = "Accuracy", 
+                                importance = TRUE)
+    rf <- AR.classify
+    
+    # Train classify
+      OOB.votes <- predict(rf, training %>% select(-c('phenotype')), type="prob");
+      pred_votes <-  OOB.votes[,2]
+      names(pred_votes) <- rownames(OOB.votes)
+      pred.obj <- prediction(pred_votes, training[names(pred_votes), ]$phenotype)
+      roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+      training_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+
+    
+    # Validation classify
+      OOB.votes <- predict(rf, validate %>% select(-c('phenotype')), type="prob");
+      pred_votes <-  OOB.votes[,2]
+      names(pred_votes) <- rownames(OOB.votes)
+      pred.obj <- prediction(pred_votes, validate[names(pred_votes), ]$phenotype)
+      roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+      validate_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+
+    
+    return(list(train_error = training_auc_roc, validate_error = validate_auc_roc))
+})
+
+tmp <- data.frame(num_trees = num_trees_list, train_error = unlist(error_list['train_error', ]), validate_error = unlist(error_list['validate_error', ]))
+tmp <- melt(tmp, id.vars = c('num_trees'))
+ggplot(tmp, aes(x = num_trees, y = value, color = variable)) + geom_line()
+```
+
+
+
+
+# Revisit classifier with more topics included (30 each)
+```{r}
+library(caret)
+library(randomForest)
+library(dplyr)
+library(ROCR)
+df$phenotype <- phen$phenotype
+df$phenotype <- ifelse(df$phenotype == "A", 1, 0)
+df <- df[ , colnames(df) != "familyID"]
+
+# Linear
+fit <- glm(phenotype ~ ., data = df, family = "binomial")
+summary(fit)
+probs <- predict(fit, newdata = df)
+preds <- probs > 0
+sum(preds == df$phenotype) / length(preds)
+
+tmp <- roc(df$phenotype, probs)
+plot(tmp)
+
+# Random forest
+data <- data1
+#data$vegetable_freq <- ps_mtg@sam_data[rownames(data), ]$vegetable_freq
+#data <- data[!is.na(data$vegetable_freq), ]
+#data$vegetable_freq <- as.factor(ifelse(data$vegetable_freq > 2, 1, 0))
+
+data$phenotype <- as.factor(data$phenotype)
+
+folds = 3
+fam_id <- unlist(sample_data(ps_mtg)[rownames(data), 'familyID'])
+folds_by_family <- groupKFold(fam_id, k = folds)
+  
+for(i in 1:folds){
+  training_ids = folds_by_family[[i]]
+  training <- data[training_ids, ]
+  validate <- data[-training_ids, ]
+  
+  control <- trainControl(method='repeatedcv', 
+                          number=3, 
+                          repeats=3)
+  
+  tree_depths <- round(seq(2, ncol(data), by = 1))
+  #tunegrid <- expand.grid(.mtry= tree_depths) #mtry is the depth of each decision tree
+  #  
+  #rf <- train(vegetable_freq ~., 
+  #            data = training, 
+  #            method='rf', 
+  #            #metric='Accuracy', 
+  #            tuneGrid=tunegrid, 
+  #            trControl=control)
+  #plot(rf)
+  num_trees_list <- seq(1, 100, 1)
+  error_list <- sapply(num_trees_list, function(num_trees){
+    AR.classify <- randomForest(phenotype ~., data = training,
+                                ntree = num_trees, mtry = 1,
+                                metric = "Accuracy", 
+                                importance = TRUE)
+    rf <- AR.classify
+    
+    #Training Linear
+    #preds <- predict(rf, training %>% select(-c('vegetable_freq')) )
+    #train_error <- sum(abs(training$vegetable_freq - preds))
+    #print(train_error)
+    #plot(training$vegetable_freq, preds)
+    
+    # validation Linear
+    #preds <- predict(rf, validate %>% select(-c('vegetable_freq')) )
+    #validate_error <- sum(abs(validate$vegetable_freq - preds))
+    #print(validate_error)
+    #plot(validate$vegetable_freq, preds)
+    #return(list(train_error = train_error, validate_error = validate_error))
+    
+    
+    # Train classify
+      OOB.votes <- predict(rf, training %>% select(-c('phenotype')), type="prob");
+      pred_votes <-  OOB.votes[,2]
+      names(pred_votes) <- rownames(OOB.votes)
+      pred.obj <- prediction(pred_votes, training[names(pred_votes), ]$phenotype)
+      roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+      training_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+
+    
+    # Validation classify
+      OOB.votes <- predict(rf, validate %>% select(-c('phenotype')), type="prob");
+      pred_votes <-  OOB.votes[,2]
+      names(pred_votes) <- rownames(OOB.votes)
+      pred.obj <- prediction(pred_votes, validate[names(pred_votes), ]$phenotype)
+      roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+      validate_auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+
+    
+    return(list(train_error = training_auc_roc, validate_error = validate_auc_roc))
+  })
+  tmp <- data.frame(num_trees = num_trees_list, train_error = unlist(error_list['train_error', ]), validate_error = unlist(error_list['validate_error', ]))
+  tmp <- melt(tmp, id.vars = c('num_trees'))
+  ggplot(tmp, aes(x = num_trees, y = value, color = variable)) + geom_line()
+}
+  
+  #OOB.votes <- predict(rf, validate %>% select(-c('fruit_freq')), type="prob");
+  #OOBpred_votes <- OOB.votes
+  #pred_votes <-  OOBpred_votes[,2]
+  #names(pred_votes) <- rownames(OOBpred_votes)
+  #pred.obj <- prediction(pred_votes, data[names(pred_votes), ]$fruit_freq)
+    
+    #roc (tpr / fpr) perforamnce 
+  roc_perf <- performance(pred.obj,"tpr", "fpr") #Calculate the AUC value
+  auc_roc <- performance(pred.obj, "auc")@y.values[[1]]
+  plot(roc_perf)
+  auc_roc
+}
+```

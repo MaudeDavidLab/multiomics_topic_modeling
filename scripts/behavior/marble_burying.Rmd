@@ -1,0 +1,95 @@
+---
+title: "CNTNAP_Marble_Analysis"
+author: "Alexandra Phillips"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+---
+# Overview 
+
+
+The marble burying test measures anxiety and obsessive-compulsive behavior as under stress the mice will bury more marbles in the bedding. 
+
+
+
+Load libraries 
+```{r message=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(ggpubr)
+library(ggplot2)
+require(reshape2)
+library(cowplot)
+library(Hmisc)
+library(mltools)
+library(plyr)
+
+```
+
+Load dataset and pre-work
+```{r echo=FALSE}
+
+marble <- read.csv(file = "../data/behavior/Marbles_07052021.csv")
+#marble <- subset(marble, Buried != "NA")
+
+#Setting up some color 
+sgColorPalette <- c("#84CF04","#01B5BB","#E50E63","#6D7272","#8F389E","#DF8236","#036B6B","#F1BA2F","#9F832D","#94E804" ,"#01D4DB","#FAC131","#B0B8B8","#F08C3A","#FF106E","#B948CC","#05B5B5","#CFAA3A")
+
+marble$Compound <- as.factor(marble$Compound)
+marble$Compound <- relevel(marble$Compound, "Control")
+
+#exclude mice from training cohort 
+marble <- marble[-c(40,41, 42, 43, 44, 45, 46, 47), ]
+#not the best way to do it, but it works. 
+
+my_comparisons <- list( c("5D", "Control"), c("Control", "UDC"), c("Control", "GDC"), c("Control", "CIT"), c("Control", "GLUT"), c("Control", "BL6"))
+```
+
+
+# Boxplot of buried marbles 
+```{r echo=FALSE}
+buried <- ggplot(marble, aes(x=Compound, y=Buried)) + 
+   geom_boxplot(aes(fill=Compound), width = 0.5)+
+  scale_fill_manual(values=sgColorPalette)+
+  geom_jitter(width = 0.25)+  
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test") +
+  ggtitle("Buried marbles") +
+  scale_x_discrete(labels=c("Control n=15", "5D n=12", "BL6 n=12", "CIT n=9", "GDC n= 12","GLUT n=8", "UDC n=12"))
+buried
+
+# ANOVA
+interaction <- aov(Buried ~ Compound, data = marble)
+summary(interaction)
+
+tukey.test <- TukeyHSD(interaction)
+tukey.test
+```
+## Conclusion 
+
+
+There are no significant different between the controls and metabolites via ANOVA, however mice fed ursodeoxycholate seem to bury more marbles and have less variation. The control cohort continues to have large variation now with two control cohorts combined. 
+
+\newline
+Mice fed glutamate have a large variation in the number of marbles buried. Mice fed citrate look very similar to the controls. 
+
+## Conclusion 
+
+
+The variation is not cohort dependent and not significantly different. Both control cohorts have a large amount of spread. 
+
+# Barplot of buried marbles 
+```{r warning=FALSE, echo=FALSE}
+# Barplot Buried Marbles VS Compound
+ggplot(marble, aes(x= Compound, y= Buried, fill = Compound)) +
+  stat_summary(geom = "bar", fun.y = mean, position = "dodge", width=0.6) +
+  stat_summary(geom = "errorbar", fun.data = mean_se, position = "dodge", width=0.6)+
+  scale_fill_manual(values=sgColorPalette)+
+  ggtitle("Buried marbles per compound")
+
+```

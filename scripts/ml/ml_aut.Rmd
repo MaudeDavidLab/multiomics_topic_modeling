@@ -1,0 +1,972 @@
+---
+title: "ml"
+output: html_document
+---
+#Load Packages
+```{r setup, include=FALSE}
+setwd("C:/Users/ctata/Documents/Lab/M3")
+library(dplyr)
+library(phyloseq)
+library(glmnet)
+library(cvAUC)
+library(lsa)
+library(DESeq2)
+library(ROCR)
+library(randomForest)
+library(caret)
+library(vegan)
+library(lsa)
+```
+
+#Load Phyloseq
+```{r}
+ps <- readRDS("ps_not_norm_comp_pass_min_postDD_mlMapping.Rda")
+ps =filter_taxa(ps, function(x) sum(x > 0) > 3, TRUE)
+print(nsamples(ps))
+ps
+```
+
+```{r}
+ps <- prune_samples(ps@sam_data$age / 12 > 2, ps)
+boxplot(ps@sam_data$age[ps@sam_data$phenotype == 'A'], ps@sam_data$age[ps@sam_data$phenotype == 'N'])
+```
+#Seasonality
+```{r}
+dates <- unlist(lapply(strsplit(ps@sam_data$date_collected, "-"), function(x) return(x[2])))
+ps@sam_data$month <- dates
+```
+
+
+
+#Embedded Data
+```{r}
+#embed <- read.table("embed/embedded_250.txt", sep = "\t")
+ps_embed <- phyloseq(otu_table(embedded, taxa_are_rows = F), sample_data(ps))
+
+ps_embed_1 <- subset_samples(ps_embed, month %in% c("01", "02", "03"))
+ps_embed_2 <- subset_samples(ps_embed, month %in% c("04", "06", "12"))
+
+#ps_embed_1 <- subset_samples(ps_embed, timepoint == "Timepoint 1")
+#ps_embed_2 <- subset_samples(ps_embed, timepoint == "Timepoint 2")
+#ps_embed_3 <- subset_samples(ps_embed, timepoint == "Timepoint 3")
+
+#ps_embed_1 <- prune_samples(ps_embed_1@sam_data$age / 12 > 2, ps_embed_1)
+#ps_embed_2 <- prune_samples(ps_embed_2@sam_data$age / 12 > 2, ps_embed_2)
+#ps_embed_3 <- prune_samples(ps_embed_3@sam_data$age / 12 > 2, ps_embed_3)
+
+print(nsamples(ps_embed_1))
+print(nsamples(ps_embed_2))
+print(nsamples(ps_embed_3))
+```
+
+#Asinh Data
+```{r}
+ps_asin <- ps
+otu_table(ps_asin) <- asinh(ps_asin@otu_table)
+
+ps_asin_1 <- subset_samples(ps_asin, timepoint == "Timepoint 1")
+ps_asin_2 <- subset_samples(ps_asin, timepoint == "Timepoint 2")
+ps_asin_3 <- subset_samples(ps_asin, timepoint == "Timepoint 3")
+
+print(nsamples(ps_asin_1))
+print(nsamples(ps_asin_2))
+print(nsamples(ps_asin_3))
+
+```
+#Asinh Data Sep. Date
+```{r}
+ps_asin <- ps
+otu_table(ps_asin) <- asinh(ps_asin@otu_table)
+ps_asin_1 <- subset_samples(ps_asin, month %in% c("01", "02", "03"))
+ps_asin_2 <- subset_samples(ps_asin, month %in% c("04", "06", "12"))
+#ps_asin_3 <- subset_samples(ps_asin, timepoint == "Timepoint 3")
+```
+
+#DESeq Data
+```{r}
+#deseq normalize
+deSeqNorm <- function(ps){
+  ps_dds <- phyloseq_to_deseq2(ps, ~ phenotype )
+  ps_dds <- estimateSizeFactors(ps_dds, type = "poscounts")
+  ps_dds <- estimateDispersions(ps_dds)
+  abund <- getVarianceStabilizedData(ps_dds)
+  abund <- abund + abs(min(abund)) #don't allow deseq to return negative counts
+  ps_deSeq <- phyloseq(otu_table(t(abund), taxa_are_rows = F), sample_data(ps))
+  return(ps_deSeq)
+}
+#ps_deseq_1 <- deSeqNorm(subset_samples(ps, timepoint == "Timepoint 1"))
+#ps_deseq_2 <- deSeqNorm(subset_samples(ps, timepoint == "Timepoint 2"))
+#ps_deseq_3 <- deSeqNorm(subset_samples(ps, timepoint == "Timepoint 3"))
+
+ps_deseq_1 <- deSeqNorm(subset_samples(ps, month %in% c("01", "02", "03")))
+ps_deseq_2 <- deSeqNorm(subset_samples(ps, month %in% c("04", "06", "12")))
+
+print(nsamples(ps_deseq_1))
+print(nsamples(ps_deseq_2))
+#print(nsamples(ps_deseq_3))
+```
+
+
+#Predict Glmnet Function
+```{r}
+#Logistic regression
+predictAut <- function(otu, mapping, test_pairs, col = "black", include_meta= T, meta_only = F){
+  tmp <- getMLInput(otu, mapping, test_pairs, include_meta = include_meta, meta_only = meta_only)
+  data_train <- tmp[[1]]
+  data_test <- tmp[[2]]
+  y_train <- tmp[[3]]
+  y_test <- tmp[[4]]
+  
+  cv <- cv.glmnet(x = as.matrix(data_train), y = as.factor(y_train), type.measure = "deviance", family = "binomial")
+  lambda <- cv$lambda.min
+  if(max(cv$lambda) == lambda){
+    lambda <- cv$lambda[30]
+  }
+  
+  acc <- sum((predict(cv, newx = as.matrix(data_test), s = lambda) > 0) == y_test) / length(y_test)
+  plot(cv)
+
+  preds_prob <- predict(cv, newx = as.matrix(data_test), s = lambda, type = "response") #5, #12
+  pred <- prediction(preds_prob, y_test)
+  
+  # calculate probabilities for TPR/FPR for predictions
+  perf <- performance(pred,"tpr","fpr")
+  print(paste("AUC: ", unlist(performance(pred,"auc")@y.values))) # shows calculated AUC for model
+  
+  return(list(preds_prob = preds_prob, y_test = y_test, cv = cv))
+}
+```
+
+#Predict RF Function
+```{r}
+predictAut_rf <- function(otu, mapping, test_pairs, col = "black", include_meta= T, meta_only = F){
+  tmp <- getMLInput(otu, mapping, test_pairs, include_meta = include_meta, meta_only = meta_only)
+  data_train <- tmp[[1]]
+  data_test <- tmp[[2]]
+  y_train <- tmp[[3]]
+  y_test <- tmp[[4]]
+  
+  ######### Use cross-validation to pick parameters from the train set ######
+  control <- trainControl(method = "oob", number = 5, search = "random")
+  seed <- 7
+  metric = "Accuracy"
+  set.seed(seed)
+  
+  rf_default <- train(x = data_train, y = as.factor(y_train),
+                      method="rf", metric=metric, tuneLength = 5, trControl=control)
+  print(rf_default$bestTune)
+  rf <- randomForest(x = data_train, y = as.factor(y_train), mtry = as.numeric(rf_default$bestTune), ntree = 500)
+  preds_prob <- predict(rf, newdata = as.matrix(data_test), type = "prob")[,2]
+  pred <- prediction(preds_prob, y_test)
+  
+  # calculate probabilities for TPR/FPR for predictions
+  perf <- performance(pred,"tpr","fpr")
+  print(paste("AUC: ", unlist(performance(pred,"auc")@y.values))) # shows calculated AUC for model
+  
+  return(list(preds_prob = preds_prob, y_test = y_test, rf = rf))
+}
+```
+
+
+#Get ML Input Function
+```{r}
+getMLInput <- function(otu, mapping, test_pairs, include_meta = T, meta_only = F){
+  set.seed(0)
+
+
+  test <- mapping$familyID %in% test_pairs
+  train <- !(mapping$familyID %in% test_pairs)
+  
+  y_train <- mapping$phenotype[train]
+  y_test <- mapping$phenotype[test]
+  y_train <- ifelse(y_train == "A", 1, -1)
+  y_test <- ifelse(y_test == "A", 1, -1)
+  
+  familyID <- mapping$familyID
+  
+  mapping <- mapping[ , !(colnames(mapping) %in% c("familyID", "phenotype", "timepoint", "time_since_antibiotics", "sampleID", "flu_symptoms", "constipation", "month", "date_collected"))]
+  father_age <- as.numeric(mapping$father_age)
+  mother_age <- as.numeric(mapping$mother_age)
+  
+  #Normalize metadata for ml
+  for(name in colnames(mapping)){
+    x <- unlist(mapping[ , name])
+    x <- as.integer(x)
+    tmp <- (x - mean(x)) / sd(x)
+    mapping[ , name] <- tmp
+  }
+
+  data <- data.frame(otu)
+  
+  #Normalize otus for ml
+  data <- data[, colSums(data) > 0]
+  data <- apply(data, 2, function(x) return( (x- mean(x)) / sd(x)))
+  
+
+  if(include_meta){
+    data <- cbind(data, mapping)
+  }
+  if(meta_only){
+    data <- mapping
+    #tmp_df <- apply(mapping, 2, function(x){
+    #  return(as.numeric(x) * father_age)
+    #})
+  }
+  
+  data_train <- data[train, ]
+  data_test <- data[test, ]
+  return(list(data_train, data_test, y_train, y_test, familyID[train], familyID[test]))
+}
+
+```
+
+#Plot ROC Curves Function
+```{r}
+plotROC_noCrossVal <- function(asin, deseq, embed, pca, meta){
+  
+  pred <- prediction(asin$preds_prob, asin$y_test)
+  perf <- performance(pred,"tpr","fpr")
+  plot(perf@x.values[[1]], perf@y.values[[1]], col = "blue", type = "l")
+  auc_asin <- performance(pred, measure = "auc")@y.values[[1]]
+  print(auc_asin)
+  
+  pred <- prediction(deseq$preds_prob, deseq$y_test)
+  perf <- performance(pred,"tpr","fpr")
+  lines(perf@x.values[[1]], perf@y.values[[1]], col = "brown")
+  auc_deseq <- performance(pred, measure = "auc")@y.values[[1]]
+  print(auc_deseq)
+  
+  pred <- prediction(embed$preds_prob, embed$y_test)
+  perf <- performance(pred,"tpr","fpr")
+  lines(perf@x.values[[1]], perf@y.values[[1]], col = "red")
+  auc_embed <- performance(pred, measure = "auc")@y.values[[1]]
+  print(auc_embed)
+  
+  pred <- prediction(pca$preds_prob, pca$y_test)
+  perf <- performance(pred,"tpr","fpr")
+  lines(perf@x.values[[1]], perf@y.values[[1]], col = "green")
+  auc_pca <- performance(pred, measure = "auc")@y.values[[1]]
+  print(auc_pca)
+  
+  pred <- prediction(meta$preds_prob, asin$y_test)
+  perf <- performance(pred,"tpr","fpr")
+  lines(perf@x.values[[1]], perf@y.values[[1]], col = "purple")
+  auc_meta <- performance(pred, measure = "auc")@y.values[[1]]
+  print(auc_meta)
+  
+  legend("bottomright", legend = c(paste("Asinh AUC: ", round(auc_asin, 3)),
+                                   paste("DESeq AUC: ", round(auc_deseq, 3)),
+                                   paste("CCA AUC: ", round(auc_embed, 3)),
+                                   paste("PCA AUC: ", round(auc_pca, 3)),
+                                   paste("Meta only AUC: ", round(auc_meta, 3))),
+         fill = c("blue", "brown", "red", "green", "purple"))
+}
+```
+
+
+#GetData Function
+```{r}
+
+getData <- function(timepoint){
+  if(timepoint == "1"){
+    ps_seqtab_use <- ps_asin_1
+    ps_embed_use <- ps_embed_1
+    ps_deseq_use <- ps_deseq_1
+  }
+  if(timepoint == "2"){
+    ps_seqtab_use <- ps_asin_2
+    ps_embed_use <- ps_embed_2
+    ps_deseq_use <- ps_deseq_2
+  }
+  if(timepoint == "3"){
+    ps_seqtab_use <- ps_asin_3
+    ps_embed_use <- ps_embed_3
+    ps_deseq_use <- ps_deseq_3
+  }
+
+  #We are comparing models w/ and w/o metadata, so we need to use the same sample set
+  sample_data(ps_seqtab_use) <- ps_seqtab_use@sam_data[complete.cases(ps_seqtab_use@sam_data), ]
+  sample_data(ps_embed_use) <- ps_embed_use@sam_data[complete.cases(ps_embed_use@sam_data), ]
+  sample_data(ps_deseq_use) <- ps_deseq_use@sam_data[complete.cases(ps_deseq_use@sam_data), ]
+  
+  set.seed(0)
+  test_pairs <- sample( unique(ps_seqtab_use@sam_data$familyID), length(unique(ps_seqtab_use@sam_data$familyID)) * .15)
+  
+  return(list(ps_seqtab_use, ps_embed_use, ps_deseq_use, test_pairs))
+} 
+
+```
+
+#Random Forest Models Function
+```{r}
+getModels_rf <- function(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta){
+  asin_rf <- predictAut_rf(otu = ps_seqtab_use@otu_table, mapping = ps_seqtab_use@sam_data, test_pairs,
+                      include_meta = include_meta, meta_only = F)
+
+  deseq_rf <- predictAut_rf(otu = ps_deseq_use@otu_table,  mapping = ps_deseq_use@sam_data, test_pairs, include_meta = include_meta)
+  
+  embed_rf <- predictAut_rf(otu = ps_embed_use@otu_table,  mapping = ps_embed_use@sam_data, test_pairs,
+                         include_meta = include_meta, meta_only = F)
+  test_labels <- ifelse(ps_embed_use@sam_data$phenotype == "A", 1, -1)
+  
+  
+  pca <- prcomp(ps_seqtab_use@otu_table)
+  data <- as.matrix(ps_seqtab_use@otu_table) %*% as.matrix(pca$rotation)
+  pca_rf <- predictAut_rf(otu = data,  mapping = ps_seqtab_use@sam_data, test_pairs, include_meta = include_meta)
+  
+  meta_rf <- predictAut_rf(otu = ps_seqtab_use@otu_table,  mapping = ps_seqtab_use@sam_data, test_pairs, meta_only = T)
+  return(list(asin_rf, deseq_rf, embed_rf, pca_rf, meta_rf))
+}
+
+```
+
+#Random Forest Metadata 1
+```{r}
+
+tmp <- getData("1")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = T)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+```
+###RF Var Imp
+```{r}
+par(mar=c(2, 2, 2, 2))
+varImpPlot(meta_rf_meta$rf)
+
+
+```
+
+#Random Forest Metadata 2
+```{r}
+
+tmp <- getData("2")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = T)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+```
+#RF Var Imp
+```{r}
+imp <- varImpPlot(meta_rf_meta$rf)
+
+vars_sort <- rownames(imp)[order(imp, decreasing = T)]
+vars <- vars_sort[3: length(vars_sort)]
+```
+
+
+#Random Forest Metadata 3
+```{r}
+
+tmp <- getData("3")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = T)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+
+
+```
+
+###RF Var Imp
+```{r}
+par(mar=c(2, 2, 2, 2))
+imp <- varImpPlot(meta_rf_meta$rf)
+
+vars_sort <- rownames(imp)[order(imp, decreasing = T)]
+vars <- vars_sort[3: length(vars_sort)]
+```
+
+
+
+#Random Forest No Metadata 1
+```{r}
+
+tmp <- getData("1")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = F)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+```
+
+#Random Forest No Metadata 2
+```{r}
+
+tmp <- getData("2")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = F)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+```
+
+#Random Forest No Metadata 3
+```{r}
+
+tmp <- getData("3")
+ps_seqtab_use <- tmp[[1]]
+ps_embed_use <- tmp[[2]]
+ps_deseq_use <- tmp[[3]]
+test_pairs <- tmp[[4]]
+
+tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = F)
+
+asin_rf_meta <- tmp[[1]]
+deseq_rf_meta <- tmp[[2]]
+embed_rf_meta <- tmp[[3]]
+pca_rf_meta <- tmp[[4]] 
+meta_rf_meta <- tmp[[5]]
+
+plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+```
+
+###RF Var Imp
+```{r}
+par(mar=c(2, 2, 2, 2))
+varImpPlot(meta_rf$rf)
+varImpPlot(embed_rf_meta$rf)
+varImpPlot(embed_rf$rf)
+varImpPlot(deseq_rf_meta$rf)
+varImpPlot(deseq_rf$rf)
+varImpPlot(asin_rf$rf)
+
+```
+
+###### Age Barplot
+```{r}
+library(ggplot2)
+map_tmp <- ps_seqtab_use@sam_data
+ggplot(map_tmp, aes(x = phenotype, y = age, fill = phenotype)) + geom_boxplot()
+```
+
+### Drop Age
+```{r}
+map_tmp <- map_tmp[ , !(colnames(ps_seqtab_use@sam_data) %in% c("age"))]
+sample_data(ps_seqtab_use) <- map_tmp
+sample_data(ps_embed_use) <- map_tmp
+sample_data(ps_deseq_use) <- map_tmp
+```
+
+
+### Glmnet Function
+```{r}
+include_meta = F
+asin_glm <- predictAut(otu = ps_seqtab_use@otu_table, mapping = ps_seqtab_use@sam_data, test_pairs,
+                      include_meta = include_meta, meta_only = F)
+
+deseq_glm <- predictAut(otu = ps_deseq_use@otu_table,  mapping = ps_deseq_use@sam_data, test_pairs, include_meta = include_meta)
+
+embed_glm <- predictAut(otu = ps_embed_use@otu_table,  mapping = ps_embed_use@sam_data, test_pairs,
+                       include_meta = include_meta, meta_only = F)
+test_labels <- ifelse(ps_embed_use@sam_data$phenotype == "A", 1, -1)
+
+
+pca <- prcomp(ps_seqtab_use@otu_table)
+data <- as.matrix(ps_seqtab_use@otu_table) %*% as.matrix(pca$rotation)
+pca_glm <- predictAut(otu = data,  mapping = ps_seqtab_use@sam_data, test_pairs, include_meta = include_meta)
+
+meta_glm <- predictAut(otu = ps_embed_use@otu_table,  mapping = ps_embed_use@sam_data, test_pairs, meta_only = T)
+
+plotROC_noCrossVal(asin_glm, deseq_glm, embed_glm, pca_glm, meta_glm)
+```
+
+
+#Permanova
+```{r}
+
+ps_use <- ps_asin_1
+sample_data(ps_use) <- ps_use@sam_data[complete.cases(ps_use@sam_data), ] 
+
+mapping <- ps_use@sam_data
+mapping <- mapping %>% select(-c("familyID", "phenotype", "timepoint", "time_since_antibiotics", "sampleID", "flu_symptoms"))
+father_age <- as.numeric(mapping$father_age)
+mother_age <- as.numeric(mapping$mother_age)
+
+#Normalize metadata for ml
+for(name in colnames(mapping)){
+  x <- unlist(mapping[ , name])
+  x <- as.integer(x)
+  tmp <- (x - mean(x)) / sd(x)
+  mapping[ , name] <- tmp
+}
+  
+dists <- phyloseq::distance(ps_use, method = "bray", type = "samples")
+
+
+form <- as.formula(paste("dists" , paste(colnames(mapping), collapse = "+"), sep = " ~ "))
+
+perm <- adonis(form, data = data.frame(mapping))
+p_adj <- p.adjust(perm$aov.tab$`Pr(>F)`, "fdr")
+perm$aov.tab$`Pr(>F)` <- p_adj
+
+library(vegan)
+library(ade4)
+beta <- betadisper(dists, mapping$dog)
+vegan::permutest(beta)
+
+```
+
+```{r}
+ord <- ordinate(ps_use, "PCoA", "bray")
+p = plot_ordination(ps_use, ord, type = "samples", color = "dog")
+p
+```
+
+
+```{r}
+ord <- ordinate(ps_deseq_1, "NMDS", "bray")
+p1 = plot_ordination(ps, ord, type = "samples", color = "dog")
+
+```
+
+#Core Microbiome
+```{r}
+
+otu <- otu_table(ps_asin_1)
+otu <- otu[ , colSums(otu) > 0]
+taxa_names_1 <- colnames(otu)
+
+otu <- otu_table(ps_asin_2)
+otu <- otu[ , colSums(otu) > 0]
+taxa_names_2 <- colnames(otu)
+
+otu <- otu_table(ps_asin_3)
+otu <- otu[ , colSums(otu) > 0]
+taxa_names_3 <- colnames(otu)
+
+taxa_core <- intersect(taxa_names_1, taxa_names_2)
+taxa_core <- intersect(taxa_core, taxa_names_3)
+
+getCoreMicrobiome <- function(ps){
+  ps_tmp <- prune_taxa(taxa_names(ps) %in% taxa_core, ps)
+  return(ps_tmp)
+}
+
+```
+
+#Random Forest No Meta Core
+```{r}
+for(i in c('1', '2', '3')){
+  tmp <- getData(i)
+  ps_seqtab_use <- getCoreMicrobiome(tmp[[1]])
+  ps_embed_use <- tmp[[2]]
+  ps_deseq_use <- getCoreMicrobiome(tmp[[3]])
+  test_pairs <- tmp[[4]]
+  
+  tmp <- getModels_rf(ps_seqtab_use, ps_deseq_use, ps_embed_use, include_meta = F)
+  
+  asin_rf_meta <- tmp[[1]]
+  deseq_rf_meta <- tmp[[2]]
+  embed_rf_meta <- tmp[[3]]
+  pca_rf_meta <- tmp[[4]] 
+  meta_rf_meta <- tmp[[5]]
+  
+  plotROC_noCrossVal(asin_rf_meta, deseq_rf_meta, embed_rf_meta, pca_rf_meta, meta_rf_meta)
+}
+#Interesting that the classifier with metadata improves so much as timepoints increase. Could be because the one's that stuck through also answered things more completely/accurately
+```
+
+#Use D. Multinomial to learn taxa parameters for each metadata variable
+```{r}
+ps_use <- ps_asin_1
+otu <- ps_use@otu_table
+map <- ps_use@sam_data
+
+#Taxa parameters using all data
+taxa_params <- list()
+drop <- c("sampleID", "timepoint", "familyID", "father_age", "mother_age", "age", "phenotype")
+vars <- colnames(map)[!(colnames(map) %in% drop)]
+for(var in vars){
+  
+  opts <- unique(unlist(map[,var]))
+  params <- lapply(opts, function(opt){
+    otu_tmp <- otu[map[ , var] == opt]
+    colMeans(otu_tmp, na.rm = T)
+  })
+  taxaMean_per_answer <- data.frame(matrix(unlist(params), byrow = T, nrow = length(params)))
+  print(dim(taxaMean_per_answer))
+  taxa_params[[var]] <- taxaMean_per_answer
+}
+
+
+#Find expected taxa parameters per condition
+
+taxa_params_sample <- list()
+for(sample in rownames(map)){
+    print(sample)
+    metadata <- map[sample, ]
+    taxa_params_tmp <- list()
+    for(var in vars){
+      opts <- unique(unlist(map[,var]))
+      val <- metadata[ , var]
+      taxa_params_var <- taxa_params[[var]]
+      taxa_params_tmp[[var]] <- taxa_params_var[which(opts == val), ]
+    }
+    taxa_params_tmp_mat <- matrix(unlist(taxa_params_tmp), byrow = T, ncol = 5265)
+    taxa_params_sample[[sample]] <- colMeans(taxa_params_tmp_mat)
+}
+
+aut_samples <- map$phenotype == "A"
+nt_samples <- map$phenotype == "N"
+
+aut_params <- colMeans(matrix(unlist(taxa_params_sample[aut_samples]), byrow = T, ncol = 5265), na.rm = T)
+nt_params <- colMeans(matrix(unlist(taxa_params_sample[nt_samples]), byrow = T, ncol = 5265), na.rm=T)
+
+sample <- otu[1,]
+pred <- apply(otu, 1, function(sample){
+  dist_aut <- sum(abs(sample - aut_params), na.rm = T)
+  dist_nt <- sum(abs(sample - nt_params), na.rm = T)
+  return(dist_aut < dist_nt)
+})
+preds <- ifelse(pred == 1, "A", "N")
+
+
+```
+
+#
+```{r}
+#What part of autism is environmental? Keep the informative data in there while doing dimensional reduction. Select taxa based on high correlation with metadata, and then try to make a classifier. Also, the taxa that are not redundant with metadata, are they informative at all? Filter out the "not prevalent enough"
+
+#canonical correspondence
+
+#Check permanova significance again
+
+
+
+#PCoa, then delete the first components (check for fun that the first PCOAs match some metadata variables). Check (permanova, classifier, etc)
+```
+
+
+#canonical Correspondence analysis
+```{r}
+
+getCCAData <- function(ps){
+  ps_cca <- ps
+  ps_cca <- prune_samples(ps_cca@sam_data$familyID != 75, ps_cca)
+  
+  mapping <- ps_cca@sam_data
+  mapping <- mapping[complete.cases(mapping), ]
+  
+  sample_data(ps_cca) <- sample_data(data.frame(mapping))
+  
+  rhs <- paste(vars, collapse = "+") #vars defined in RF Var Imp
+  form <- paste("ps_cca", "~", rhs)
+  c <- ordinate(ps_cca, "CCA", formula = formula(form))
+  ps_cca <- phyloseq(otu_table(cbind(c$CCA$u, c$CA$u), taxa_are_rows = F), sample_data(ps@sam_data))
+  return(list(ps_cca, c))
+}
+
+```
+
+```{r}
+tmp <- getCCAData(ps_asin_1)
+ps_cca <- tmp[[1]]
+c <- tmp[[2]]
+ps1p <- ps_cca
+psCCpnA <- c
+library("dplyr")
+
+scoresCCpnA = vegan::scores(psCCpnA)
+sites = data.frame(scoresCCpnA$sites)
+sites$SampleID = rownames(sites)
+sample_data(ps1p)$SampleID <- sample_names(ps1p)
+df <- data.frame(ps1p@sam_data)
+sites = left_join(sites, df)
+species = data.frame(scoresCCpnA$species)
+
+```
+
+```{r}
+library(ggrepel)
+evalProp = 100 * psCCpnA$CCA$eig[1:2] / sum(psCCpnA$CA$eig)
+ggplot() +
+ geom_point(data = sites,aes(x =CCA2, y =CCA1),shape =2,alpha=0.5) +
+ geom_point(data = species,aes(x =CCA2,y =CCA1),size=1)+
+ geom_text_repel(data = sites ,
+                   aes(x = CCA2, y = CCA1, label = familyID),
+                   size = 2, segment.size = 0.1)+
+  facet_grid(.~phenotype)
+
+#based on this, I want to drop family 75 and try again
+
+```
+#Predict CCA 1
+```{r}
+vars <- vars_sort[3:length(vars_sort)]
+tmp <- getCCAData(ps_asin_1)
+ps_cca <- tmp[[1]]
+ps_asin_use <- ps_asin_1
+ps_deseq_use <- ps_deseq_1
+ps_asin_use <- prune_samples(sample_names(ps_asin_use) %in% sample_names(ps_cca), ps_asin_use)
+ps_deseq_use <- prune_samples(sample_names(ps_deseq_use) %in% sample_names(ps_cca), ps_deseq_use)
+
+tmp <- getModels_rf(ps_asin_use, ps_deseq_use, ps_cca, include_meta = F)
+plotROC_noCrossVal(tmp[[1]], tmp[[2]], tmp[[3]], tmp[[4]], tmp[[5]])
+```
+
+#Predict CCA 2
+```{r}
+tmp <- getCCAData(ps_asin_2)
+ps_cca <- tmp[[1]]
+ps_asin_use <- ps_asin_2
+ps_deseq_use <- ps_deseq_2
+ps_asin_use <- prune_samples(sample_names(ps_asin_use) %in% sample_names(ps_cca), ps_asin_use)
+ps_deseq_use <- prune_samples(sample_names(ps_deseq_use) %in% sample_names(ps_cca), ps_deseq_use)
+
+tmp <- getModels_rf(ps_asin_use, ps_deseq_use, ps_cca, include_meta = F)
+plotROC_noCrossVal(tmp[[1]], tmp[[2]], tmp[[3]], tmp[[4]], tmp[[5]])
+```
+
+#Predict CCA 3
+```{r}
+tmp <- getCCAData(ps_asin_3)
+ps_cca <- tmp[[1]]
+ps_asin_use <- ps_asin_3
+ps_deseq_use <- ps_deseq_3
+ps_asin_use <- prune_samples(sample_names(ps_asin_use) %in% sample_names(ps_cca), ps_asin_use)
+ps_deseq_use <- prune_samples(sample_names(ps_deseq_use) %in% sample_names(ps_cca), ps_deseq_use)
+
+tmp <- getModels_rf(ps_asin_use, ps_deseq_use, ps_cca, include_meta = F)
+plotROC_noCrossVal(tmp[[1]], tmp[[2]], tmp[[3]], tmp[[4]], tmp[[5]])
+```
+
+
+#PCoA 
+```{r}
+#Goal is to delete some major sources of variation, which are likely due to large dietary or seasonal variations
+ps_asin_use <- ps_asin_1
+ps_asin_use <- prune_samples(complete.cases(ps_asin_use@sam_data), ps_asin_use)
+pcoa <- ordinate(ps_asin_use, "PCoA")
+
+dists <- vegdist(pcoa$vectors[ , :ncol(pcoa$vectors)], method = "euclidean")
+#dists <- phyloseq::distance(ps_asin_use, method = "bray", type = "samples")
+
+mapping <- ps_asin_use@sam_data
+mapping <- mapping %>% select(-c("familyID", "phenotype", "timepoint", "time_since_antibiotics", "sampleID", "flu_symptoms"))
+for(name in colnames(mapping)){
+  x <- unlist(mapping[ , name])
+  x <- as.integer(x)
+  tmp <- (x - mean(x)) / sd(x)
+  mapping[ , name] <- tmp
+}
+mapping$phenotype <- ps_asin_use@sam_data$phenotype
+form <- as.formula(paste("dists" ,  paste(colnames(mapping), collapse = "+"), sep = " ~ "))
+
+perm <- adonis(form, data = data.frame(mapping))
+perm$aov.tab[perm$aov.tab$`Pr(>F)` < .05, ]
+
+
+
+
+```
+
+```{r}
+##Attempted to classify only based on some later PCoA components, thinking that the large variation is due to diet and such and that the smaller variations might better explain the autism phenotype. This was not the case.
+ps_pcoa <- phyloseq(otu_table(pcoa$vectors[ ,8 :ncol(pcoa$vectors)], taxa_are_rows = F), sample_data(ps_asin_use))
+
+ps_asin_use <- ps_asin_1
+ps_deseq_use <- ps_deseq_1
+ps_asin_use <- prune_samples(sample_names(ps_asin_use) %in% sample_names(ps_pcoa), ps_asin_use)
+ps_deseq_use <- prune_samples(sample_names(ps_deseq_use) %in% sample_names(ps_pcoa), ps_deseq_use)
+
+tmp <- getModels_rf(ps_asin_use, ps_deseq_use, ps_pcoa, include_meta = F)
+
+
+ps_pcoa <- phyloseq(otu_table(pcoa$vectors[ , 20 :ncol(pcoa$vectors)], taxa_are_rows = F), sample_data(ps_asin_use))
+pcoa_rf <- predictAut_rf(otu = ps_pcoa@otu_table,  mapping = ps_pcoa@sam_data, test_pairs,
+                         include_meta = F, meta_only = F)
+
+plotROC_noCrossVal(tmp[[1]], tmp[[2]], pcoa_rf, tmp[[4]], tmp[[5]])
+```
+
+
+
+##Permanova
+```{r}
+
+ps_use <- ps_asin_1
+sample_data(ps_use) <- ps_use@sam_data[complete.cases(ps_use@sam_data), ] 
+
+mapping <- ps_use@sam_data
+mapping <- mapping %>% select(-c("familyID", "phenotype", "timepoint", "time_since_antibiotics", "sampleID", "flu_symptoms"))
+#father_age <- as.numeric(mapping$father_age)
+#mother_age <- as.numeric(mapping$mother_age)
+
+#Normalize metadata for ml
+for(name in colnames(mapping)){
+  x <- unlist(mapping[ , name])
+  x <- as.integer(x)
+  tmp <- (x - mean(x)) / sd(x)
+  mapping[ , name] <- tmp
+}
+  
+dists <- phyloseq::distance(ps_use, method = "bray", type = "samples")
+
+
+form <- as.formula(paste("dists" , paste(colnames(mapping), collapse = "+"), sep = " ~ "))
+
+perm <- adonis(form, data = data.frame(mapping))
+p.adjust(perm$aov.tab$`Pr(>F)`, "fdr")
+
+library(vegan)
+library(ade4)
+beta <- betadisper(dists, mapping$dog)
+vegan::permutest(beta)
+```
+
+#Kmer table
+
+```{r}
+seq <- seqs[1]
+seq<- as.character(seq)
+seqs <- as.character(seqs)
+kmers_small <- lapply(seqs[1:100], function(seq){
+  kmers_tmp <- lapply(1: (nchar(seq) - k), function(i) return(substr(seq, i, i+k-1)))
+  return(table(unlist(kmers_tmp)))
+})
+names(kmers_small) <- seqs[1:100]
+
+matrix(unlist(kmers_small)
+
+```
+
+```{r}
+library(seqTools)
+#Run overnight
+k = 6
+asvid_map <- read.csv("ASVid_map.csv")
+rownames(asvid_map) <- asvid_map$ASVid
+seqs <- asvid_map[taxa_names(ps), 2]
+kmers_5 <- lapply(seqs, function(seq){
+  print(i)
+  return(get.kmers(as.character(seq), .k = k))
+} )
+kmers_use <- kmers_5
+names(kmers_use) <- seqs
+kmer_ids <- unique(unlist(lapply(kmers_use, function(x) return(x$Kmers))))
+
+taxa_kmer <- data.frame(matrix(rep(0, ntaxa(ps) * length(kmer_ids)), ncol = length(kmer_ids)))
+rownames(taxa_kmer) <- seqs
+colnames(taxa_kmer) <- kmer_ids
+
+for(i in seq(1, length(kmers_use))){
+  print(i)
+  taxa_kmer[names(kmers_use)[i], kmers_use[[i]]$Kmers] <- rowSums(cbind(taxa_kmer[names(kmers_use)[i], kmers_use[[i]]$Kmers],  kmers_use[[i]]$Count), na.rm = T)
+}
+saveRDS(taxa_kmer, paste("taxa_kmer_", k, ".rds", sep = ""))
+#Sequence 6 particularly interesting as it harbors a large ratio of unique kmers
+#taxa_kmer_filt <- taxa_kmer[ , colSums(taxa_kmer) < 1000]
+```
+
+```{r}
+taxa_kmer_filt <- taxa_kmer[ , colSums(taxa_kmer) < 4000] #exclude kmers that are just in every taxa
+otu <- ps@otu_table
+otu <- apply(otu, 1, function(sample) return(sample / sum(sample)))
+otu <- t(otu)
+colnames(otu) <- asvid_map[colnames(otu), 2]
+sample_kmer <- as.matrix(otu) %*% as.matrix(taxa_kmer_filt)
+saveRDS(sample_kmer, "sample_kmer_6.rds")
+```
+
+#Wilcox text on separate timepoints
+```{r}
+ps_kmer <- phyloseq(otu_table(sample_kmer, taxa_are_rows = F), sample_data = sample_data(ps))
+
+#Separate timepoints
+ps_kmer_1 <- subset_samples(ps_kmer, timepoint == "Timepoint 1")
+ps_kmer_2 <- subset_samples(ps_kmer, timepoint == "Timepoint 2")
+ps_kmer_3 <- subset_samples(ps_kmer, timepoint == "Timepoint 3")
+
+
+#Aggregate timepoints
+sample_names_keep <- intersect(sample_names(ps_kmer_1), sample_names(ps_kmer_2))
+sample_names_keep <- intersect(sample_names_keep, sample_names(ps_kmer_3))
+
+```
+
+```{r}
+ps_use <- ps_kmer_1
+ps_aut <- subset_samples(ps_use, phenotype == "A")
+ps_nt <- subset_samples(ps_use, phenotype == "N")
+pvals <- c()
+
+ps_aut <- prune_samples(ps_aut@sam_data$familyID %in% ps_nt@sam_data$familyID, ps_aut )
+ps_nt <- prune_samples(ps_nt@sam_data$familyID %in% ps_aut@sam_data$familyID, ps_nt )
+
+for(i in seq(1, ntaxa(ps_use))){
+  tmp <- wilcox.test(ps_aut@otu_table[,i], ps_nt@otu_table[,i], paired = T)
+  pvals <- c(pvals, tmp$p.value)
+}
+pvals
+
+
+```
+
+```{r}
+taxa_keep <- taxa_names(ps_aut)[which(pvals < .05)]
+ps_aut <- prune_taxa(taxa_keep, ps_aut)
+ps_nt <- prune_taxa(taxa_keep, ps_nt)
+
+ps_aut <- prune_samples(ps_aut@sam_data$familyID %in% ps_nt@sam_data$familyID, ps_aut )
+ps_nt <- prune_samples(ps_nt@sam_data$familyID %in% ps_aut@sam_data$familyID, ps_nt )
+
+for(i in seq(1,20)){
+  plot(ps_aut@otu_table[, i], ps_nt@otu_table[,i])
+  lines(seq(1, 50), seq(1,50))
+}
+
+```
+
+
+
+
+
+

@@ -1,24 +1,24 @@
 # Libraries
 ```{r}
-library("rstan")
+#library("rstan")
 library("reshape2")
 library("stringr")
 library("phyloseq")
 #library("ggscaffold")
-library("feather")
+#library("feather")
 library(ggplot2)
 library(ggpubr)
 library(vegan)
 
-library(DirichletMultinomial)
+#library(DirichletMultinomial)
 library(lattice)
 library(xtable)
 library(parallel)
 library(pheatmap)
 
-library(tm)
-library(slam)
-library(topicmodels)
+#library(tm)
+#library(slam)
+#library(topicmodels)
 library(Boruta)
 
 
@@ -31,19 +31,18 @@ library(gridExtra)
 ```
 
 # Read in data
-```{r}
-
-ps_mtg <- readRDS("../data/mtg/ps_rle_nooutliers.rds")
+```{r, eval = F}
+ps_mtg <- readRDS("../../data/mtg/ps_rle_nooutliers.rds")
 ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
-ps_16s <- readRDS("../results/topic_modeling/ps_16s_dds_taxannotation.rds")
-ps_mtt <- readRDS("../data/mtt/ps_mtt_rle_nooutliers.rds")
-ps_mbx <- readRDS("../data/metabol/ps_mbx_rle_nooutliers_fixedmapping.rds")
+ps_16s <- readRDS("../../results/topic_modeling/ps_16s_dds_taxannotation.rds")
+ps_mtt <- readRDS("../../data/mtt/ps_mtt_rle_nooutliers.rds")
+ps_mbx <- readRDS("../../data/metabol/ps_mbx_rle_nooutliers_fixedmapping.rds")
 ```
 
 
 
 # Rarefy MTT samples with abnormally high counts
-```{r}
+```{r, eval = F}
 data <- t(ps_mtg@otu_table)
 hist(apply(data, 1, max), main = "original distribution")
 
@@ -67,7 +66,7 @@ saveRDS(ps_mtg_rarefy_outliers, file = "../data/mtg/ps_mtg_rle_nooutliers_fixedm
 
 
 # Rarefy MTT samples with abnormally high counts
-```{r}
+```{r, eval = F}
 data <- t(ps_mtt@otu_table)
 hist(apply(data, 1, max), main = "original distribution")
 
@@ -89,7 +88,7 @@ saveRDS(ps_mtt_rarefy_outliers, file = "../data/mtt/ps_mtt_rle_nooutliers_fixedm
 
 
 # Rarefy MBX samples with abnormally high counts in 1 metabolite
-```{r}
+```{r, eval = F}
 data <- t(ps_mbx@otu_table)
 hist(apply(data, 1, max), main = "Each sample's max count for single metabolite")
 hist(apply(data, 2, max), main = "Each metabolites's max count for single sample")
@@ -133,7 +132,7 @@ ggsave("../results/latent_variable_modeling/model_selection/likelihood_mbx.pdf",
 ```{r}
 ps_mtg <- readRDS("../../data/mtg/ps_mtg_rle_nooutliers_adjcounts.rds")
 ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
-ps_16s <- readRDS("../../results/topic_modeling/ps_16s_dds_taxannotation.rds")
+ps_16s <- readRDS("../../data/16s/ps_16s_dds_taxannotation.rds")
 ps_mtt <- readRDS("../../data/mtt/ps_mtt_rle_nooutliers_adjcounts.rds")
 ps_mbx <- readRDS("../../data/mbx/ps_mbx_rle_nooutliers_adjcounts_fixedmapping.rds")
 ```
@@ -342,11 +341,11 @@ p_mtt <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/mtt_
 
 # Load final models
 ```{r}
-model_16s <- readRDS("../../results/latent_variable_modeling/16s_models_50000/model_16s_4topics_50000iter_0.05filter.rds")
-model_mtg <- readRDS("../../results/latent_variable_modeling//mtg_models_50000/model_mtg_5topics_50000iter_0.1filter.rds") # 3 topics based on hist(colSums(thetas_mtg), breaks = 50) at high number of topics. Only 3 have large values across samples
+model_16s <- readRDS("../../results/latent_variable_modeling/models/16s_models_50000/model_16s_4topics_50000iter_0.05filter.rds")
+model_mtg <- readRDS("../../results/latent_variable_modeling/models//mtg_models_50000/model_mtg_5topics_50000iter_0.1filter.rds") # 3 topics based on hist(colSums(thetas_mtg), breaks = 50) at high number of topics. Only 3 have large values across samples
 
-model_mtt <- readRDS("../../results/latent_variable_modeling//mtt_models_50000/model_mtt_4topics_50000iter_0.1filter.rds") # 3topics, same logic
-model_mbx <- readRDS("../../results/latent_variable_modeling/mbx_models_50000//model_mbx_7topics_50000iter_0.1filter.rds")
+model_mtt <- readRDS("../../results/latent_variable_modeling/models//mtt_models_50000/model_mtt_4topics_50000iter_0.1filter.rds") # 3topics, same logic
+model_mbx <- readRDS("../../results/latent_variable_modeling/models/mbx_models_50000//model_mbx_7topics_50000iter_0.1filter.rds")
 
 folder <- "16s-4_mtg-5_mtt-4_mbx-7/"
 ```
@@ -356,7 +355,7 @@ folder <- "16s-4_mtg-5_mtt-4_mbx-7/"
 
 # Line up topics based on shared distributions across samples
 ```{r}
-clusterTopics <- function(model_16s, model_mtg, model_mtt, model_mbx, k, remove_mtt = F){
+clusterTopics <- function(model_16s, model_mtg, model_mtt, model_mbx, k, remove_mtt = T){
   thetas_16s <- model_16s@gamma
   rownames(thetas_16s) <- sample_names(ps_16s_filt)
   betas_16s <- model_16s@beta
@@ -509,7 +508,7 @@ ggsave(paste0("../../results/latent_variable_modeling/", folder, "/number_cluste
 
 # Cluster topics
 ```{r}
-tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = 4, remove_mtt = F)
+tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = 4, remove_mtt = T)
 df <- tmp$df
 thetas_16s <- tmp$thetas_16s
 thetas_mtg <- tmp$thetas_mtg
@@ -723,6 +722,15 @@ p_metadata <- pheatmap(t(df_sort), cluster_rows = T, cluster_cols = F,
               clustering_distance_rows = "correlation",
               color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8),
               display_numbers = df_annotate_sort)
+
+
+
+# cluster dietary variables on just sample distribution
+control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "probiotic",  "vitamin_B", "vitamin_D", "age")
+df <- ps_mtg@sam_data[ , control_variables]
+df <- df[complete.cases(df),]
+df <- apply(df, 2, function(x) return((x - mean(x)) / var(x)))
+pheatmap(df)
 ```
 
 # Correlate Metadata, postive or negative drivers?
@@ -795,7 +803,7 @@ ann_colors <- list(phenotype = phenotype)
 
 #rownames(df) <- paste("Sample", seq(1,nrow(df)))
 #rownames(phen) <- rownames(df)
-p <- pheatmap(df, annotation_row = phen, cluster_cols = T, 
+p <- pheatmap(t(df), annotation_row = phen, cluster_cols = T, 
               clustering_distance_rows = 'correlation',clustering_distance_cols = 'correlation',
               color = diverging_hcl(200, palette = "PurpleGreen",rev = T),
               #labels_col = rep("", nrow(df)), 
@@ -824,6 +832,18 @@ getwd()
 ggsave(paste0("../../results/latent_variable_modeling/", folder, "/full_heatmap_infographic.pdf"), p, width = 7, height = 12)
 
 ```
+
+# PCoA of samples in topic space, colored by group
+```{r}
+df_phen$group<- as.factor(ifelse(rownames(df_phen) %in% rownames(data1), 1, 2))
+ps_tmp <- phyloseq(otu_table(df, taxa_are_rows = F), sample_data(df_phen))
+ord <- ordinate(ps_tmp, distance = "bray")
+plot_ordination(ps_tmp, ord, type = "samples", color = "group") + theme_bw() + geom_point(size = 4)
+```
+
+
+
+
 
 # Check family membership
 ```{r}
@@ -891,6 +911,159 @@ p <- plotMetadata(df_meta, control_variables, title = "All")
 ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_none.pdf"), p, width = 8, height = 6)
 
 
+```
+
+# Behavior differences in cluster 1 vs. cluster 2
+```{r, fig.height = 6, fig.width = 8}
+behavior_vars <- c("Language.ability.and.use..Biospecimen.",	"Conversation.ability..Biospecimen.",	"Understands.speech..Biospecimen.",	"Plays.imaginatively.when.alone..Biospecimen.",
+                   "Plays.imaginatively.with.others..Biospecimen.",	"Plays.in.a.group.with.others..Biospecimen.",	"Eye.contact.finding..Biospecimen.",
+                   "Childhood.behavioral.development.finding..Biospecimen.",	"Repetitive.motion..Biospecimen.",	"Picks.up.objects.to.show.to.others..Biospecimen.",
+                   "Sleep.pattern.finding..Biospecimen.",	"Response.to.typical.sounds..Biospecimen.",	"Self.injurious.behavior.finding..Biospecimen.",
+                   	"Imitation.behavior..Biospecimen.", "Gastrointestinal.problems..M3...Biospecimen.", "Stool.frequency..Biospecimen.")
+
+df <- data.frame(rbind(data1, data2))
+phenotypes <- data.frame(ps_tmp@sam_data[rownames(df), behavior_vars])
+phenotypes <- phenotypes[complete.cases(phenotypes), ]
+
+language <- list("Able to speak fluently" = 0, "Phrase speech" = 1, "Single word speech" = 2, "Little to no speech" = 3)
+conversation <- list("Able to have conversation" = 0, "Difficulty with conversation" = 2,"Limited conversation ability" = 3, "Cannot have a conversation" = 4)
+speech <- list("Understands nearly all words"  = 0, "Understands most words" = 1, "Understands many words" = 2, "Understands about half of words" = 3, "Understands few or no words"  = 4)
+timing <- list("Regularly" = 0, "Sometimes" = 1, "Rarely" = 2, "Never" = 3, "No opportunity to play with other children" = NA)
+eye_contact <- list("Consistent eye contact"=0, "Some eye contact"=1, "Little or no eye contact" = 2)
+rep_motion <- list("Never" = 0, "Sometimes" = 1, "Regularly" = 2)
+#development scale is not clearly ordered
+sleep <- list("Healthy sleep pattern" = 0, "Some sleep difficulties" = 1, "Constant sleep difficulties" = 2)
+sounds <- list("Not bothered by typical sounds" = 0, "Sensitive to typical sounds" = 1, "Highly sensitive to typical sounds" = 2 )
+self_harm <- list("No self-injurious behavior" = 0 , "Mild self-harming behavior" = 1, "Dangerous or frequent self-harming behavior" =2)
+gi <- list("No issues" = 1, "Sometimes" = 1, "Continuous" = 2)
+imitate <- list("Imitates actions or gestures of others" = 0, "Imitates others when prompted" = 1, "Does not imitate others" =2)
+stool_freq <- list("1" = 1, "2" = 2, "3" = 3, "Less than 1" = 0, "5 or more" = 5, "4" = 4)
+
+phenotypes_numeric <- phenotypes
+phenotypes_numeric$language <- unlist(language[phenotypes$Language.ability.and.use])
+phenotypes_numeric$conversation <- unlist(conversation[phenotypes$Conversation.ability])
+phenotypes_numeric$speech <- unlist(speech[phenotypes$Understands.speech])
+phenotypes_numeric$play_imagine_alone <- unlist(timing[phenotypes$Plays.imaginatively.when.alone])
+phenotypes_numeric$play_imagine_others <- unlist(timing[phenotypes$Plays.imaginatively.with.others])
+phenotypes_numeric$play_group_others <- unlist(timing[phenotypes$Plays.in.a.group.with.others])
+phenotypes_numeric$eye_contact <- unlist(eye_contact[phenotypes$Eye.contact.finding])
+phenotypes_numeric$repetitive_motion <- unlist(rep_motion[phenotypes$Repetitive.motion])
+phenotypes_numeric$shows_objects_others <- unlist(timing[phenotypes$Picks.up.objects.to.show.to.others])
+phenotypes_numeric$sleep <- unlist(sleep[phenotypes$Sleep.pattern.finding])
+phenotypes_numeric$sounds <- unlist(sounds[phenotypes$Response.to.typical.sounds])
+phenotypes_numeric$no_self_harm <- unlist(self_harm[phenotypes$Self.injurious.behavior.finding])
+phenotypes_numeric$gi <- unlist(gi[phenotypes$Gastrointestinal.problems..M3.])
+phenotypes_numeric$imitate_behavior <- unlist(imitate[phenotypes$Imitation.behavior])
+phenotypes_numeric$stool_freq <- unlist(stool_freq[phenotypes$Stool.frequency..Biospecimen.])
+
+phenotypes_numeric <- phenotypes_numeric %>% select(c("language", "conversation", "speech", "play_imagine_alone", "play_imagine_others",
+                                "play_group_others", "eye_contact", "repetitive_motion", "shows_objects_others", "sleep",
+                                "sounds", "no_self_harm", "imitate_behavior", "gi", "stool_freq")) #14
+phenotypes_numeric <- apply(phenotypes_numeric, 2, function(x) return( (x- mean(x, na.rm=T)) / sd(x, na.rm = T)))
+
+
+cluster_id <- data.frame(cluster_id = rep(1, nrow(phenotypes_numeric)))
+rownames(cluster_id) <- rownames(phenotypes_numeric)
+cluster_id$cluster_id[rownames(cluster_id) %in% rownames(data2)] <- 2
+cluster_id$cluster_id <- as.factor(cluster_id$cluster_id)
+
+#phen <- cluster_id
+#phenotype <- c("orange", "blue")
+#names(phenotype) <- c("1", "2")
+#ann_colors <- list(phenotype = phenotype)
+pheatmap(phenotypes_numeric, annotation_row = cluster_id)
+
+behavior_1 <- ps_tmp@sam_data[rownames(data1), behavior_vars]
+behavior_2 <- ps_tmp@sam_data[rownames(data2), behavior_vars]
+
+behavior_1 <- behavior_1[complete.cases(behavior_1), ]
+behavior_2 <- behavior_1[complete.cases(behavior_2), ]
+
+
+
+# Correlations between any topics and behavior
+df <- data.frame(rbind(data1, data2))
+df <- data.frame(cbind(df[rownames(phenotypes_numeric), ], phenotypes_numeric))
+df_m <- melt(df, id.vars = colnames(phenotypes_numeric))
+df_m <- df_m[order(df_m$variable), ]
+df_m$gi <- as.factor(df_m$gi)
+
+p <- ggplot(df_m , aes(x = gi, y = value)) + geom_boxplot() + facet_wrap(~variable, ncol = 4) + geom_jitter(width = 0.2) + stat_compare_means(method = "wilcox")
+
+p <- ggplot(df_m , aes(x = stool_freq, y = value)) + geom_point() + facet_wrap(~variable, ncol = 4)  + 
+  geom_smooth(method = "lm")+
+   stat_poly_eq(formula = y~x, 
+                aes(label = paste(..p.value.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE,
+                digits = 3)+
+  theme_bw() + ggtitle("GI")
+p
+
+p <- ggplot(df_m , aes(x = conversation, y = value)) + geom_point() + facet_wrap(~variable, ncol = 4)  + 
+  geom_smooth(method = "lm")+
+   stat_poly_eq(formula = y~x, 
+                aes(label = paste(..p.value.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE,
+                digits = 3)+
+  theme_bw() + ggtitle("Conversation")
+p
+
+p <- ggplot(df_m , aes(x = speech, y = value)) + geom_point() + facet_wrap(~variable, ncol = 4)  + 
+  geom_smooth(method = "lm")+
+   stat_poly_eq(formula = y~x, 
+                aes(label = paste(..p.value.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE,
+                digits = 3)+
+  theme_bw() + ggtitle("Speech")
+p
+
+
+p <- ggplot(df_m , aes(x = play_imagine_alone, y = value)) + geom_point() + facet_wrap(~variable, ncol = 4)  + 
+  geom_smooth(method = "lm")+
+   stat_poly_eq(formula = y~x, 
+                aes(label = paste(..p.value.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE,
+                digits = 3)+
+  theme_bw() + ggtitle("Play imagine alone")
+p
+
+
+p <- ggplot(df_m , aes(x = eye_contact, y = value)) + geom_point() + facet_wrap(~variable, ncol = 4)  + 
+  geom_smooth(method = "lm")+
+   stat_poly_eq(formula = y~x, 
+                aes(label = paste(..p.value.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE,
+                digits = 3)+
+  theme_bw() + ggtitle("Eye contact")
+p
+
+#
+df <- data.frame(rbind(data1, data2))
+df <- df[rownames(phenotypes_numeric), ]
+df <- df %>% select(-c("phenotype"))
+
+mat1 <- df[rownames(df) != "M3_128_P1_A_V1",]
+mat2 <- phenotypes_numeric[rownames(phenotypes_numeric) != "M3_128_P1_A_V1",]
+library(Hmisc)
+cor_sig <- t(sapply(1:ncol(mat1), function(x) {
+    sapply(1:ncol(mat2), function(y) {
+      rcorr(mat1[,x],mat2[,y])[[3]][1,2]
+    })
+  }))
+cor_coef <- t(sapply(1:ncol(mat1), function(x) {
+    sapply(1:ncol(mat2), function(y) {
+      rcorr(mat1[,x],mat2[,y])[[1]][1,2]
+    })
+  }))
+
+df_annotate <- apply(cor_sig, 2, function(x) ifelse(x<.06, "*", ""))
+rownames(cor_coef) <- colnames(mat1)
+colnames(cor_coef) <- colnames(mat2)
+p <- pheatmap(-cor_coef, display_numbers = df_annotate,
+              color = diverging_hcl(200, palette = "PurpleGreen",rev = T),
+              alpha = 0.8)
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.pdf",p, width = 5, height = 5)
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.png",p, width = 5, height = 5)
 ```
 
 
@@ -1096,6 +1269,7 @@ pvals<- tmp$pvals
 df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
 p1_mbx <- doThePlot(df_plot, title = "Within cluster 1", ncol = 3)
 ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.pdf"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5)
+ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.png"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
 p1_mbx
 
 ################### Group 2  ####################################################################
@@ -1111,7 +1285,7 @@ pvals<- tmp$pvals
 df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
 p2_mbx <- doThePlot(df_plot, title = "Within cluster 2", ncol = 3)
 ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.pdf"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*3 + .5)
-
+ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.png"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
 p2_mbx
 ```
 
@@ -1401,8 +1575,35 @@ ggplot(df_phen, aes(x = cluster, y = MARA, fill = cluster)) + geom_boxplot()+
   stat_compare_means()
 ```
 
+# treemap
+```{r}
+library(treemap)
+
+makeTreemap <- function(df, thresh = 2, char = " ", title = ""){
+  words <- sapply(df$Definition, function(x) return(strsplit(x, char)[[1]]))
+  words <- lapply(words, function(x) return(strsplit(x, " ")))
+  words <- unlist(words)
+  words <- gsub(",", "", words)
+  words[words == "transporter"] <- "transport"
+  words[words == "transcriptional"] <- "transcription"
+  words[words == "two-component-system"] <- "two-component"
+
+  words_count <- table(words)
+  words_count <- words_count[words_count > thresh]
+  words_count <- sort(words_count, decreasing = T)
+  df_plot <- data.frame(words = names(words_count), value = as.numeric(words_count))
+  df_plot <- df_plot[!df_plot$words %in% c("protein", "family", "putative", "family,", "system,", "system", "type", "and", "for", "cell", "of", "or", "subunit", "transport", "regulator", "(1)", "2'", "product",
+                                           "2,3", "(2)", "metabolite"),  ]
+  df_plot <- df_plot[nchar(df_plot$words) > 1, ]
+  df_plot <- df_plot[!grepl("\\[EC", df_plot$words), ]
+  treemap(df_plot, index = "words", vSize = "value", title = title, drop.unused.levels = FALSE, fontsize.labels = 20)
+}
+
+```
+
+
 # Feature weights MBX
-```{r, fig.height = 16, fig.width = 8}
+```{r, fig.height = 15, fig.width = 8}
 quantile_breaks <- function(xs, n = 10) {
     breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
     return(breaks[!duplicated(breaks)])
@@ -1431,12 +1632,11 @@ features <- colnames(betas)
 meds <- apply(betas, 2, median)
 maxs <- apply(betas, 2, max)
 sds <- apply(betas, 2, sd)
-keep1 <- maxs > (meds + 1.5*sds)
+keep1 <- maxs > (meds + 1.5*sds) 
 #values <- (maxs - meds) / sds
 
 #keep1 <- values >= quantile(values, probs = seq(0, 1, .01))["50%"]
-#keep <- keep & meds < .0001
-print(sum(keep1))
+#print(sum(keep1))
 
 
 # PCoA on the topic by feature matrix using correlation as the distance metric
@@ -1446,7 +1646,7 @@ rownames(tmp$v) <- colnames(betas)
 
 keep2 <- rowSums(apply(tmp$v, 2, function(x){
   x <- abs(x)
-  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["99.0%"]
+  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["97.0%"] # "99.0%"
   return(x > quantile_lim)
 } )) > 0
 print(sum(keep2))
@@ -1495,10 +1695,66 @@ p_mbx <- pheatmap(to_plot, cluster_cols = F,
 #ggsave(paste0("../../results/latent_variable_modeling/", folder, "topic_features_mbx.pdf"), p_mbx, width = 5.5, height = 9)
 
 
+
+#betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.5))]
+betas <- t(to_plot)
+betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.6))]
+p <- pheatmap(t(betas), cluster_cols = F, 
+         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+setwd("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/")
+
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mbx_features_isme.pdf", p, width = 5.5, height = 9)
+topic_assignment <- rownames(betas)[apply(betas, 2, function(x) return(which(x == max(x))))]
+
+df <- data.frame(metabolite = colnames(betas), Definition = colnames(betas), topic_assignment = topic_assignment)
+df_topic1 <- df[grepl("topic1", df$topic_assignment), ]
+df_topic2 <- df[grepl("topic2", df$topic_assignment), ]
+df_topic3 <- df[grepl("topic3", df$topic_assignment), ]
+df_topic4 <- df[grepl("topic4", df$topic_assignment), ]
+#write(rownames(df_topic1), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic1.txt")
+#write(rownames(df_topic2), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic2.txt")
+#write(rownames(df_topic3), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic3.txt")
+#write(rownames(df_topic4), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic4.txt")
+
+dim(df_topic1)
+dim(df_topic2)
+dim(df_topic3)
+dim(df_topic4)
 ```
 
+
+
+
+```{r, fig.width = 6}
+cleanMetaboliteNames <- function(x){
+  x <- gsub("N-acetyl", "", x)
+  x <- gsub("N-acetyl-", "", x)
+  x <- gsub("N-carbamoyl", "", x) 
+  x <- gsub("N-carbamoyl-", "", x) 
+  x <- gsub("1-methyl", "", x) 
+  return(x)
+}
+
+
+df_topic1$Definition <- cleanMetaboliteNames(df_topic1$metabolite)
+p1 <- makeTreemap(df_topic1, thresh = 2, char= "-",  title = "Words in Topic 1")
+df_topic2$Definition <- cleanMetaboliteNames(df_topic2$metabolite)
+p2 <- makeTreemap(df_topic2, thresh = 1, char= "-",  title = "Words in Topic 2")
+df_topic3$Definition <- cleanMetaboliteNames(df_topic3$metabolite)
+p3 <- makeTreemap(df_topic3, thresh = 0, char= "-",  title = "Words in Topic 3")
+df_topic4$Definition <- cleanMetaboliteNames(df_topic4$metabolite)
+p4 <- makeTreemap(df_topic4, thresh = 2, char= "-",  title = "Words in Topic 4")
+
+
+
+```
+
+
+
+
 # Feature weights MTG
-```{r, fig.height = 14, fig.width = 14}
+```{r, fig.height = 10, fig.width = 15}
 betas <- exp(betas_mtg)
 betas <- betas[!is.na(rowSums(betas)), ]
 print(dim(betas))
@@ -1524,10 +1780,7 @@ maxs <- apply(betas, 2, max)
 sds <- apply(betas, 2, sd)
 keep1 <- maxs > (meds + 1.5*sds)
 #values <- (maxs - meds) / sds
-
 #keep1 <- values >= quantile(values, probs = seq(0, 1, .01))["50%"]
-#keep <- keep & meds < .0001
-print(sum(keep1))
 
 
 # PCoA on the topic by feature matrix using correlation as the distance metric
@@ -1535,13 +1788,14 @@ tmp <- svd(betas)
 rownames(tmp$v) <- colnames(betas)
 
 
+# Keep most explanatory features in pca between topics
 keep2 <- rowSums(apply(tmp$v, 2, function(x){
   x <- abs(x)
-  quantile_lim <- quantile(x, probs = seq(0, 1, .0001))["99.90%"]
+  quantile_lim <- quantile(x, probs = seq(0, 1, .0001))["80.00%"] # "99.00%"
   return(x > quantile_lim)
 } )) > 0
 print(sum(keep2))
-keep <- keep1 & keep2
+keep <-  keep1 & keep2
 print(sum(keep))
 
 betas <- apply(betas, 2, function(x) return(x / sum(x)))
@@ -1559,39 +1813,104 @@ p_mtg <- pheatmap(to_plot, cluster_cols = F,
 
 
 
-# remove topic 3 from interpretation
-#betas <- betas[!grepl("topic3", rownames(betas)), ]
+
+# trying to visualize without filtering
+# COnsider clustering and mandating that each cluster have a mean weight abovea threshold
+
+
+#betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.5))]
+#betas_mtg <- betas[c("topic2_MTG", "topic3_MTG"),]
+#betas_mtg <- betas_mtg[ , apply(betas_mtg, 2, function(x) return(max(x) > 0.5))]
+#pheatmap(t(betas_mtg), cluster_cols = F, 
+#         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+betas <- t(to_plot)
+betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.7))]
+pheatmap(t(betas), cluster_cols = F, 
+         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+
+topic_assignment <- rownames(betas)[apply(betas, 2, function(x) return(which(x == max(x))))]
+
+df <- data.frame(metabolite = colnames(betas), Definition = colnames(betas), topic_assignment = topic_assignment)
+df_topic1 <- df[grepl("topic1", df$topic_assignment), ]
+df_topic2 <- df[grepl("topic2", df$topic_assignment), ]
+df_topic3 <- df[grepl("topic3", df$topic_assignment), ]
+df_topic4 <- df[grepl("topic4", df$topic_assignment), ]
 
 
 
+#write(rownames(df_topic1), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic1.txt")
+#write(rownames(df_topic2), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic2.txt")
+#write(rownames(df_topic3), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic3.txt")
+#write(rownames(df_topic4), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_KO_topic4.txt")
 
-# Only high weights
-#thresh <- apply(betas, 1, function(x){
-#  return(quantile(x, probs = seq(0, 1, .001))["99.0%"])
-#})
-#keep <- betas[1,] > thresh[1] | betas[2,] > thresh[2] | betas[3,] > thresh[3] 
-#to_plot <- t(betas[, keep])
-
-#mat_breaks <- quantile_breaks(unlist(to_plot), n = 20)
-
-#to_plot <- to_plot[, order(colnames(to_plot))]
-#p_mtg <- pheatmap(to_plot, cluster_cols = F,
-#              color = diverging_hcl(20, palette = "PurpleGreen", rev = T, alpha = 0.8),
-#              breaks = mat_breaks,
-#              fontsize_col = 10,
-#              fontsize_row = 10)
-
-#p_mtg
-#betas_mtg_plot <- to_plot
-#ggsave(paste0("../../results/latent_variable_modeling/", folder, "topic_features_mtg.pdf"), p_mtg, width = 7.5, height = 6)
+dim(df_topic1)
+dim(df_topic2)
+dim(df_topic3)
+dim(df_topic4)
 
 
 
 
 ```
 
+```{r}
+  possible_functions <- c( "reductase", "aminotransferase", "esterase", "protease III", "dehydratase",
+                        "cytochrome", "flagella", "secretion", "two-component",  
+                     "chromosome partition", "glycosyltransferase", "peroxidase", "chaperone",
+                        "lipopolysaccharide", "chemotaxis", "universal stress protein", "cell division", "MFS transporter", "type VI secretion", "pillus", "usher",
+                        "regulatory", "motility", "aeurotactic", "heam", "competence", "transposase", "glutamine", "adhesin")
+                     # "transcription","dehydrogenase")
+
+colors <- base::sample(x = qualitative_hcl(n = length(possible_functions), palette = 'Set 2'), size = length(possible_functions), replace = F)
+names(colors) <- possible_functions
+
+makeTreemap_manual <- function(df_topic, thresh, title = ""){
+
+
+  words_counts <- unlist(lapply(possible_functions, function(x){
+    return(sum(grepl(x, df_topic$Definition)))
+  }))
+  
+  names(words_counts) <- possible_functions
+  words_counts <- words_counts[words_counts > thresh]
+  words_counts <- sort(words_counts, decreasing = T)
+  df_plot <- data.frame(words = names(words_counts), value = as.numeric(words_counts))
+  df_plot <- df_plot[!df_plot$words %in% c("protein", "family", "putative", "family,", "system,", "system", "type", "and", "for", "cell", "of", "or", "subunit", "transport", "regulator", "(1)", "2'", "product",
+                                             "2,3", "(2)", "metabolite"),  ]
+  df_plot <- df_plot[nchar(df_plot$words) > 1, ]
+  df_plot <- df_plot[!grepl("\\[EC", df_plot$words), ]
+  df_plot$words <- factor(df_plot$words, levels = possible_functions)
+  ggplot(df_plot, aes(area = value, fill = words, label = words, subgroup = words)) + geom_treemap() + geom_treemap_subgroup_border(color= "black")+
+    geom_treemap_text(colour = "black",
+                    place = "centre",
+                    size = 15, grow = T) +
+    scale_fill_manual(values = colors[df_plot$words], guide = 'none')+
+    ggtitle(title)
+  #p <- treemap(df_plot, index = "words", vSize = "value", vColor = "words", type = "categorical", title = title, drop.unused.levels = FALSE, fontsize.labels = 20)
+}
+  
+```
+
+```{r, fig.width = 6, fig.height = 4}
+# Natural language processing - the word "sulfate" appears in this topic's feature list
+
+
+p1 <- makeTreemap_manual(df_topic1, thresh = 3, title = "Words in Topic 1")
+p2 <- makeTreemap_manual(df_topic2, thresh = 3,  title = "Words in Topic 2")
+p3 <- makeTreemap_manual(df_topic3, thresh = 0,  title = "Words in Topic 3")
+p4 <- makeTreemap_manual(df_topic4, thresh = 5,  title =  "Words in Topic 4")
+p4
+ggarrange(plotlist = list(p1, p2, p3, p4))
+# adaptation?
+
+#Topic 3 seems to be two component system
+#In its most basic form, a TCRS consists of a membrane-bound sensor kinase and a DNA-binding response regulator. 
+```
+
 # Feature weights MTT
-```{r, fig.height = 9, fig.width = 10}
+```{r, fig.height = 10, fig.width = 25}
 colnames(betas_mtt) <- data.frame(ps_mtt_filt@tax_table)$Definition
 betas <- exp(betas_mtt)[!is.na(rowSums(betas_mtt)), ]
 
@@ -1629,7 +1948,7 @@ rownames(tmp$v) <- colnames(betas)
 
 keep2 <- rowSums(apply(tmp$v, 2, function(x){
   x <- abs(x)
-  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["99.9%"]
+  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["99.9%"] #99.9%
   return(x > quantile_lim)
 } )) > 0
 print(sum(keep2))
@@ -1643,6 +1962,7 @@ to_plot <- to_plot[ , order(colnames(to_plot))]
 
 #mat_breaks <- quantile_breaks(unlist(to_plot), n = 100)
 #to_plot <- apply(to_plot, 2, function(x) return())
+rownames(to_plot)[rownames(to_plot) == "H+-transporting ATPase [EC:7.1.2.1]"] <- "yeast plasma membrane ATPase [EC 7.1.2.1]" # same enzyme in kegg, just synonymous name that I'd like to report
 p_mtt <- pheatmap(to_plot, cluster_cols = F,
               color = diverging_hcl(50, palette = "PurpleGreen", rev = T, alpha = 0.8),
               #breaks = mat_breaks,
@@ -1682,11 +2002,46 @@ p_mtt <- pheatmap(to_plot, cluster_cols = F,
 
 
 
+#betas <- betas[order(rownames(betas)), ]
+# Keep anything that's above 0.6, heuristic for clusters
+#betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.8))]
+
+#pheatmap(t(betas), cluster_cols = F, 
+#         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+
+betas <- t(to_plot)
+betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.6))]
+p <- pheatmap(t(betas[c("topic1_MTT.1", "topic1_MTT", "topic3_MTT", "topic4_MTT"), ]), cluster_cols = F, 
+         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtt_features_isme.pdf", p, width = 7.5, height = 7)
+
+topic_assignment <- rownames(betas)[apply(betas, 2, function(x) return(which(x == max(x))))]
+
+df <- data.frame(ko = colnames(betas), Definition = colnames(betas), topic_assignment = topic_assignment)
+df_topic1 <- df[grepl("topic1", df$topic_assignment), ]
+df_topic2 <- df[grepl("topic2", df$topic_assignment), ]
+df_topic3 <- df[grepl("topic3", df$topic_assignment), ]
+df_topic4 <- df[grepl("topic4", df$topic_assignment), ]
+
+#write(rownames(df_topic3), file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtt_KO_topic3.txt")
+
 
 ```
 
+```{r, fig.width = 6, fig.height = 4}
+p1 <- makeTreemap_manual(df_topic1, thresh = 3, title = "Words in Topic 1")
+#p2 <- makeTreemap_manual(df_topic2, thresh = 3,  title = "Words in Topic 2")
+p3 <- makeTreemap_manual(df_topic3, thresh = 0,  title = "Words in Topic 3")
+p4 <- makeTreemap_manual(df_topic4, thresh = 5,  title =  "Words in Topic 4")
+p4
+ggarrange(plotlist = list(p1,  p3, p4))
+```
+
 # Feature weights 16s
-```{r, fig.height = 14, fig.width = 10}
+```{r, fig.height = 50, fig.width = 10}
 betas <- exp(betas_16s)
 print(dim(betas))
 
@@ -1724,12 +2079,12 @@ rownames(tmp$v) <- colnames(betas)
 
 keep2 <- rowSums(apply(tmp$v, 2, function(x){
   x <- abs(x)
-  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["98.5%"]
+  quantile_lim <- quantile(x, probs = seq(0, 1, .001))["98.5%"] # 98.5%
   return(x > quantile_lim)
 } )) > 0
 
 print(sum(keep2))
-keep <- keep1 & keep2
+keep <-  keep2
 print(sum(keep))
 
 # make relative
@@ -1744,29 +2099,45 @@ p_16s <- pheatmap(to_plot, cluster_cols = F,
               fontsize_col = 10,
               fontsize_row = 10)
 
-#betas <- apply(betas, 2, function(x) return(x / sum(x)))
+#betas <- betas[order(rownames(betas)), ]
+# Keep anything that's above 0.6, heuristic for clusters
+#betas <- betas[ , apply(betas, 2, function(x) return(max(x) > 0.5))]
+#pheatmap(t(betas), cluster_cols = F, 
+#         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
 
-# remove topic 3 from interpretation
-#betas <- betas[!grepl("topic3", rownames(betas)), ]
+
+betas <- t(to_plot)
+p <- pheatmap(t(betas), cluster_cols = F, 
+         color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8))
+
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/16s_features_isme.pdf", p, width = 7, height = 9)
+topic_assignment <- rownames(betas)[apply(betas, 2, function(x) return(which(x == max(x))))]
+
+df <- data.frame(asv = colnames(betas), Definition = colnames(betas), topic_assignment = topic_assignment)
+df_topic1 <- df[grepl("topic1", df$topic_assignment), ]
+df_topic2 <- df[grepl("topic2", df$topic_assignment), ]
+df_topic3 <- df[grepl("topic3", df$topic_assignment), ]
+df_topic4 <- df[grepl("topic4", df$topic_assignment), ]
+
+```
 
 
-# Only high weights
-#thresh <- apply(betas, 1, function(x){
-#  return(quantile(x, probs = seq(0, 1, .001))["98.5%"])
-#})
+```{r, fig.width = 8}
+df_topic1$Definition <- sapply(df_topic1$asv, function(x) return(strsplit(x, " ")[[1]][[4]]))
+df_topic1 <- df_topic1[df_topic1$Definition != "NA", ]
+p1 <- makeTreemap(df_topic1, thresh = 3, char = "-", "Words in Topic 1")
 
-#keep <- betas[1,] > thresh[1] | betas[2,] > thresh[2] 
+df_topic2$Definition <- sapply(df_topic2$asv, function(x) return(strsplit(x, " ")[[1]][[4]]))
+df_topic2 <- df_topic2[df_topic2$Definition != "NA", ]
+p2 <- makeTreemap(df_topic2, thresh = 3, char = "-","Words in Topic 2")
 
-#to_plot <- t(betas[, keep])
-#to_plot <- to_plot[, order(colnames(to_plot))]
-#mat_breaks <- quantile_breaks(unlist(to_plot), n = 20)
-#p_16s <- pheatmap(to_plot, cluster_cols = F, 
-#              color = diverging_hcl(length(mat_breaks), palette = "PurpleGreen", rev = T, alpha = 0.8),
-#               breaks = mat_breaks,
-#              fontsize_col = 10,
-#              fontsize_row = 10)
-#betas_16s_plot <- to_plot
-#ggsave(paste0("../../results/latent_variable_modeling/", folder, "topic_features_16s.pdf"), p_16s, width = 6.5, height = 8)
+df_topic3$Definition <- sapply(df_topic3$asv, function(x) return(strsplit(x, " ")[[1]][[4]]))
+df_topic3 <- df_topic3[df_topic3$Definition != "NA", ]
+p3 <- makeTreemap(df_topic3, thresh = 3, char = " ","Words in Topic 3")
+
+df_topic4$Definition <- sapply(df_topic4$asv, function(x) return(strsplit(x, " ")[[1]][[4]]))
+df_topic4 <- df_topic4[df_topic4$Definition != "NA", ]
+p4 <- makeTreemap(df_topic4, thresh = 3, char = "-", "Words in Topic 4")
 ```
 
 # Figure 2: Visualize together
@@ -1795,7 +2166,7 @@ p <- grid.arrange(
 #   heights = c(12,12))
 #p <- ggarrange(plotlist = list( p_mbx[[4]], p_mtg[[4]], p_16s[[4]], p_mtt[[4]], p_metadata[[4]] ), widths = c(12, 6), heights = c(3, 3))
 ggsave(paste0("../../results/latent_variable_modeling/", folder, "/figure2.pdf"), plot = p, width = 18, height = 13)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/figure2.png"), plot = p, width = 18, height = 13)
+ggsave(file = paste0("../../results/latent_variable_modeling/", folder, "/figure2.png"), plot = p, width = 18, height = 13)
 getwd()
 ```
 
@@ -2134,7 +2505,19 @@ p <- ggplot(df_phen_m , aes(x = MARA, y = value)) + geom_point() + facet_wrap(~v
   theme_bw()
 
 ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/topic_MARA_correlations.pdf", p, width = 10, height = 8)
+p
 
+
+cor_coef <- t(sapply(1:ncol(mat1), function(x) {
+    sapply(1:ncol(mat2), function(y) {
+      rcorr(mat1[,x],mat2[,y])[[1]][1,2]
+    })
+  }))
+
+tests <- apply(df_phen %>% select(-c("phenotype", "group")), 2, function(x){
+  cor.test(x, df_phen_tmp$MARA, method = "spearman")
+})
+lapply(tests, function(x) return(x$p.value))
 ```
 
 # Topic correlation sex
@@ -2170,6 +2553,41 @@ p <- ggplot(df_phen_m , aes(x = phenotype, y = value, fill = phenotype)) + geom_
   theme_bw()
 
 ```
+
+# Topic correlation to diversity
+```{r, fig.width=12, fig.height = 11}
+
+div <- diversity(t(ps_16s@otu_table))
+div <- div[samples]
+df <- df[, order(colnames(df))]
+plots <- lapply(colnames(df), function(x){
+  topic_vals <- df[ ,x]
+  df_tmp <- data.frame(diversity = div, topic = topic_vals)
+  p <- ggplot(data = df_tmp, aes(x = topic, y = diversity)) + geom_point() + geom_smooth(method = "lm") + theme_bw() +
+    stat_cor(method = "pearson", label.x = 0, label.y = 7) + ggtitle(x)
+  return(p)
+})
+p <- ggarrange(plotlist = plots)
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/topic_diversity_correlation.pdf", p, width = 12, height = 12)
+```
+
+
+# Topic 2 antibiotics
+```{r, fig.width=12, fig.height = 11}
+antibiotics <- ps_mtg@sam_data[samples, ]$min_time_antibiotics
+plots <- lapply(colnames(df), function(x){
+  topic_vals <- df[ ,x]
+  df_tmp <- data.frame(antibiotics = antibiotics, topic = topic_vals)
+  df_tmp <- df_tmp[df_tmp$antibiotics < 3, ]
+  p <- ggplot(data = df_tmp, aes(x = topic, y = antibiotics)) + geom_point() + geom_smooth(method = "lm") + theme_bw() +
+    stat_cor(method = "pearson", label.x = 0, label.y = 7) + ggtitle(x)
+  return(p)
+})
+p <- ggarrange(plotlist = plots)
+p
+```
+
+
 
 
 

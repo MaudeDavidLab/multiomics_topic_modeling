@@ -1,0 +1,189 @@
+---
+title: "analysis"
+output: html_document
+---
+
+```{r}
+library(vegan)
+library(phyloseq)
+library(dplyr)
+library(lme4)
+library(caret)
+library(DESeq2)
+library(ape)
+library(reshape2)
+library(randomForest)
+library(caret)
+library(KEGGREST)
+library(pROC)
+library(glmnet)
+library(patchwork)
+library(VennDiagram)
+library(ggVennDiagram)
+library(ggpubr)
+library(ggplotify)
+library(colorspace)
+library(aod)
+library(VennDiagram)
+
+```
+
+```{r}
+source('../metadata/clean_mapping_ml.R')
+ps_mtg <- readRDS("../../data/mtg/ps_rle_nooutliers.rds")
+ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
+ps_16s <- readRDS("../../results/topic_modeling/ps_16s_dds_taxannotation.rds")
+ps_mtt <- readRDS("../../data/mtt/ps_mtt_rle_nooutliers.rds")
+ps_mbx <- readRDS("../../data/mbx/ps_rle_nooutliers_adj_counts_fixedmapping.rds")
+
+```
+
+```{r}
+asd_color <- "#01898D"
+td_color <- "#67A102"
+```
+
+# Venn Diagram of available omics
+```{r}
+
+
+samples_mtg <- sample_names(ps_mtg)
+samples_mtt <- sample_names(ps_mtt)
+samples_metabol <- sample_names(ps_metabol)
+samples_mtg <- gsub("F1", "P1", samples_mtg)
+samples_mtt <- gsub("F1", "P1", samples_mtt)
+samples_metabol <- gsub("F1", "P1", samples_metabol)
+
+#exact same samples
+p1 <- ggVennDiagram(x = list(samples_mtg, samples_mtt, samples_metabol),
+             category.names = c("mtg", "mtt", "metabol")) +
+  scale_fill_continuous_sequential(palette = "Heat2")+
+  scale_colour_manual(values = c("black", "black", "black"))+
+  ggtitle("Omics available for the same stool sample")
+p1
+#samples from same individual
+samples_mtg <- ps_mtg@sam_data$host_name
+samples_mtt <- ps_mtt@sam_data$host_name
+samples_metabol <- ps_metabol@sam_data$host_name
+
+p2 <- ggVennDiagram(x = list(samples_mtg, samples_mtt, samples_metabol),
+             category.names = c( "mtg", "mtt", "metabol")) +
+   scale_fill_continuous_sequential(palette = "Heat2")+
+  scale_colour_manual(values = c("black", "black", "black"))+
+  ggtitle("Omics availabe from the same individual")
+```
+
+```{r}
+p <- ggarrange(p1, p2)
+p
+ggsave("~/Lab/M3/results/summary_statistics/venn_diagrams/omics_available.pdf", p, width= 8)
+```
+
+# Master mapping file
+```{r}
+library(plyr)
+map_16s <- ps_16s@sam_data
+map_16s$omic <- "16s"
+map_mtg <- ps_mtg@sam_data
+map_mtg$omic <- "mtg"
+map_mtt <- ps_mtt@sam_data
+map_mtt$omic <- "mtt"
+map_metabol <- ps_metabol@sam_data
+map_metabol$omic <- "metabol"
+
+map_master <- data.frame(rbind.fill(map_16s, map_mtg, map_mtt, map_metabol))
+map_master$biospecimen_name <- gsub("F1", "P1", map_master$biospecimen_name)
+map_master_one_host <- map_master[!duplicated(map_master$host_name), ]
+
+dim(map_master_one_host)
+```
+#Fix ps_metabol mapping
+```{r}
+map <- ps_metabol@sam_data
+rownames(map) <- map$biospecimen_name
+rownames(map) <- gsub("F1", "P1", rownames(map))
+
+map_tmp <- map_master[map_master$biospecimen_name %in% rownames(map), ]
+map_tmp <- map_tmp[!duplicated(map_tmp$biospecimen_name), ]
+rownames(map_tmp) <- map_tmp$biospecimen_name
+sample_data(ps_metabol) <- sample_data(map_tmp[rownames(map), ])
+saveRDS(ps_metabol, "data/metabol/ps_rle_nooutliers_fixedmapping.rds")
+```
+
+
+# Age histogram
+```{r, fig.height = 2, fig.width = 3}
+map_master_one_host$age <- as.numeric(map_master_one_host$age)
+p <- ggplot(map_master_one_host) + geom_histogram(aes(x = age/12, stat = "count",  fill = phenotype), color = 'grey',  alpha = 0.3) + ylab("Count") + xlab("Age in years") + theme_classic() + scale_fill_manual(values = list("A" = asd_color, "N" = td_color))+ scale_color_manual(values = list("A" = asd_color, "N" = td_color))
+p
+ggsave("~/Lab/M3/results/summary_statistics/age_histogram.pdf", p, width = 3, height = 3)
+```
+
+# Select distance metrics based on family proximity
+```{r}
+# distance_choices.R
+```
+
+# Mantel tests comparing distances between samples using different omics
+```{r}
+# create two distance matrices using two omics, then mantel test between the distance matrices
+# answers the question: how closely do different omics compare to one another in distinguishing between samples
+source("comparing_omics.R")
+tmp <- getHeatmaps(ps_16s, ps_mtg, ps_mtt, ps_metabol)
+p <- ggarrange(as.ggplot(tmp[[1]]), as.ggplot(tmp[[2]]))
+
+ggsave("../../results/summary_statistics/comparing_omics.pdf", p, width = 8, height = 4)
+```
+
+# Which omic most represents lifestyle? Permanova
+```{r}
+# 
+#detach("package:plyr", unload = TRUE)
+#detach("package:dplyr", unload = TRUE)
+library(dplyr)
+source("omic_explainability.R")
+runExplainabilityTest <- function(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric){
+  tmp <- getExplainability(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric) #bootstrap 10 random subsets of 50 samples to run permanova
+  df <- tmp[[1]]
+  df_pvals <- tmp[[2]]
+  tmp <- melt(df)
+  tmp <- tmp %>% group_by(category, variable) %>% summarize(mean = mean(value), sd = sd(value))
+  
+  # put pvalues in
+  tmp_pvals <- melt(df_pvals)
+  tmp_pvals <- tmp_pvals %>% group_by(category, variable) %>% summarize(mean = mean(value))
+  tmp$pval <- tmp_pvals$mean
+  tmp$sig <- as.character(ifelse(tmp$pval < .05, "*",  " "))
+  
+  tmp$category <- factor(tmp$category, levels = c("Diet", "Racial Group", "Sex", "Age", "Stool_freq","Probiotic",  "Csection", "Vitamin B", "Dietary Supplement", "Dog", "Phenotype"))
+  tmp$mean <- round(tmp$mean, 3) * 100
+  p <- ggplot(tmp, aes(x = variable, y = category, fill = mean)) + 
+    geom_raster() + ggtitle(paste("Omic explained by lifestyle - ", distance_metric, " distance"))+
+    geom_text(aes(label = paste(mean, "%", sig))) + scale_fill_continuous_sequential(palette = "Heat2")
+
+  #p <- ggplot(tmp, aes(x = variable, y = mean, fill = category)) + geom_bar(stat = "identity", position = "dodge") + ylim(0, 1) + ylab("% variability explained by variable in omic")+
+  #  geom_errorbar(aes(x = variable, ymin = mean-sd, ymax = mean+sd), width = 0.2, position=position_dodge(width=0.9))+
+  #  ggtitle(paste("Omic explained by lifestyle - ", distance_metric, " distance"))
+  return(p)
+}
+p_horn <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "horn")
+p_bray <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "bray")
+p_euclidean <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "euclidean")
+p_manhattan <- runExplainabilityTest(ps_16s, ps_mtg, ps_mtt, ps_metabol, distance_metric = "manhattan")
+
+p <- ggarrange(p_horn, p_bray, p_euclidean, p_manhattan)
+ggsave("~/Lab/M3/results/summary_statistics/omic_lifestyle_explainability.pdf", p, width= 11, height = 7)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,140 @@
+---
+title: "ml_classifier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Lab/M3")
+library(dplyr)
+library(phyloseq)
+library(glmnet)
+
+```
+
+###Load Phyloseq
+```{r load_phyloseq}
+ps <- readRDS("ps_not_norm_comp_pass_min_postDD.Rda")
+print(nsamples(ps))
+seqRead_thresh <- mean(sample_sums(ps)) + 3*sd(sample_sums(ps))
+ps <- prune_samples(sample_sums(ps) < seqRead_thresh, ps)
+print(nsamples(ps))
+seqRead_thresh <- mean(sample_sums(ps)) - 3*sd(sample_sums(ps))
+ps <- prune_samples(sample_sums(ps) > seqRead_thresh, ps)
+print(nsamples(ps))
+```
+
+
+###Clean Mapping
+```{r clean_mapping, echo=FALSE}
+map <- ps@sam_data
+print(dim(map))
+
+metadata_keep <- c("Host.Name", "Within.study.sampling.date..Biospecimen." , "Biospecimen.Date.Collected", "Family.group.ID..Biospecimen.",
+                   "Pet.dog..Biospecimen.", "Pet.cat..Biospecimen." ,
+                   "Minimum.time.since.antibiotics..Biospecimen.", "Stool.frequency..Biospecimen.",
+                   "Born.by.caesarian.section..Biospecimen.", "Other.GI.symptoms..M3...Biospecimen.",
+                   "Biological.sex..Biospecimen.", "Gluten.allergy..Biospecimen.",
+                   "Non.celiac.gluten.sensitivity..Biospecimen." , 
+                   "Whole.grain..consumption.frequency...Biospecimen.", "Fermented.vegetable..consumption.frequency...Biospecimen.",               
+                   "Dairy..consumption.frequency...Biospecimen." ,"Fruit..consumption.frequency...Biospecimen.",
+                   "Meals.prepared.at.home..consumption.frequency...Biospecimen.","Ready.to.eat.meals..consumption.frequency...Biospecimen.",
+                   "Meat..consumption.frequency...Biospecimen.", "Olive.oil.used.in.cooking..M3...Biospecimen." ,
+                   "Seafood..consumption.frequency...Biospecimen.","Sweetened.drink..consumption.frequency...Biospecimen." ,
+                   "Vegetable..consumption.frequency...Biospecimen.", "Restaurant.prepared.meals..consumption.frequency...Biospecimen.",
+                   "Sugary.food..consumption.frequency...Biospecimen." ,"Diet.during.infancy..Biospecimen." ,
+                   "Lactose.intolerance..Biospecimen." , "Born.prematurely..Biospecimen.",
+                   "Environmental.tobacco.smoke.exposure..Biospecimen.","Vitamin.B.complex.supplement..consumption.frequency...Biospecimen.",
+                   "Vitamin.D..consumption.frequency...Biospecimen.", "Recently.ill..Biospecimen.",
+                   "Diarrhea..Biospecimen.","Constipation..Biospecimen.",
+                   "Starchy.food..consumption.frequency...longitudinal...Biospecimen.","Bread..consumption.frequency...longitudinal...Biospecimen.",
+                   "Natural.father.current.age..months...Biospecimen." ,"Natural.mother.current.age..months...Biospecimen." ,
+                   "Flu.like.symptoms..Biospecimen.", "Fever..Biospecimen.", "phenotype", "Age..months.")
+
+map <- map[ , metadata_keep]
+rename_cols <- c("sampleID", "timepoint", "date_collected", "familyID",
+                  "dog", "cat",
+                  "time_since_antibiotics", "stool_freq", 
+                  "csection", "other_GI_symptoms", 
+                  "sex", "gluten_allergy",
+                  "nonceliac_sensitivity",
+                   "whole_grain", "fermented_vegetables",
+                   "dairy", "fruit",
+                   "meal_home_prep", "meal_ready_eat", 
+                   "meat", "olive_oil", 
+                   "seafood", "sweetened_drink",
+                   "vegetable", "restaurant", 
+                   "sugary_food", "infant_diet",
+                   "lactose_intolerance", "prematurely_born", 
+                   "env_tobacco",  "vitamin_B",
+                   "vitamin_D", "recently_ill", 
+                   "diarrhea", "constipation", 
+                   "starchy_food",  "bread", 
+                  "father_age", "mother_age", 
+                  "flu_symptoms", "fever",
+                  "phenotype", "age")
+colnames(map) <- rename_cols
+map$sampleID <- substr(map$sampleID, 1, 5)
+print(dim(map))
+
+```
+
+
+###Mapping Numeric
+```{r mapping_numeric}
+
+map <- map[map$sampleID != "089_A", ] #Child is breastfed 
+map$sex <- ifelse(map$sex == "Male", 0, 1)
+map$stool_freq <- as.character(map$stool_freq)
+map$stool_freq[as.character(map$stool_freq) == "Less than 1"] = 0
+map$stool_freq[as.character(map$stool_freq) == "5 or more"] = 5
+
+mother_milk_dict <- list("Mother's milk diet" = 1, "Mixed infant formula and mother's milk diet" = 2, "Infant formula diet" = 3)
+map$infant_diet <- unlist(mother_milk_dict[map$infant_diet])
+
+freq_dict_2 <- list("Never" = 0, "Rarely" = 1, "Occasionally" = 2, "Regularly" = 3, "Weekly" = 4, "weekly" = 4,
+                    "Several time weekly" = 5, "Several times weekly" = 5, "Daily" = 6)
+dict_2_items <- c("whole_grain", "fermented_vegetables", "dairy", "fruit",
+                  "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food",  "vitamin_B", "vitamin_D")
+for(item in dict_2_items){
+  print(item)
+  tmp <- rep(NA, nrow(map))
+  tmp[!is.na(map[, item]) & map[,item] != "" & map[,item] != "NA"] <-  unlist(freq_dict_2[as.character(unlist(map[ , item]))])
+  map[ , item] <- tmp
+}
+
+
+freq_dict_1 <- list("Never or less than once per week" = 0, "3-4 meals per week" = 1, "5" = 2, "7-10 meals per week" = 3, "Almost every meal" = 4)
+dict_1_items <- c("starchy_food", "bread")
+for(item in dict_1_items){
+  print(item)
+  tmp <- rep(NA, nrow(map))
+  #print(length(tmp[!is.na(map[, item])]) - length(unlist(freq_dict_1[as.character(unlist(map[ , item]))])))
+  tmp[!is.na(map[, item]) & map[,item] != "NA"] <-  unlist(freq_dict_1[as.character(unlist(map[ , item]))])
+  map[ , item] <- tmp
+}
+
+logicals <- c("dog", "cat", "csection", "other_GI_symptoms", "gluten_allergy", "nonceliac_sensitivity", "lactose_intolerance", "prematurely_born", "env_tobacco", "recently_ill", "diarrhea", "constipation", "flu_symptoms", "fever")
+
+for(item in logicals){
+  print(item)
+  map[,item] <- as.logical(unlist(map[,item]))
+}
+
+
+```
+
+```{r}
+ps <- phyloseq(otu_table(t(ps@otu_table), taxa_are_rows = F), sample_data(map), tax_table(ps@tax_table))
+saveRDS(ps, "ps_not_norm_comp_pass_min_postDD_mlMapping.Rda")
+```
+
+
+### Write ASV table and Fasta
+```{r}
+taxa_names(ps) <- as.character(ps@tax_table[,2]) #name by full sequences
+write.table(otu_table(ps), "seqtab_ml.txt", sep = "\t", quote = F, row.names =T, col.names = T)
+headers <- paste(">", as.character(ps@tax_table[,1]), sep = "")
+fasta <- paste(headers, taxa_names(ps), collapse = "\n", sep = "\n")
+write(fasta, "repseqs_ml.fasta")
+```

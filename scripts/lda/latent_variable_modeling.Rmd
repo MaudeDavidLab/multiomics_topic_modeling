@@ -1,0 +1,882 @@
+---
+title: "latent_variable_modeling"
+output: html_document
+---
+
+```{r}
+library("rstan")
+library("reshape2")
+library("stringr")
+library("phyloseq")
+#library("ggscaffold")
+library("feather")
+
+library(DirichletMultinomial)
+library(lattice)
+library(xtable)
+library(parallel)
+library(pheatmap)
+```
+
+```{r}
+ps_contigs <- readRDS("../data/archae/ps_contigs_500bp_lengthnorm.rds")
+
+# Agglomerate by family for austin
+families <- unique(ps_contigs@tax_table[ , 10])
+family_sets <- split(families, ceiling(seq_along(families)/5))
+
+ps_list <- list()
+i = 1
+for(family_set in family_sets[1:50]){
+  print(i)
+  family_set <- as.character(family_set)
+  ps_tmp <- subset_taxa(ps_contigs, Family %in% as.character(family_set))
+  ps_tmp <- tax_glom(ps_tmp, taxrank = "Family")
+  ps_list[[i]] <- ps_tmp
+  i = i + 1
+}
+ps_tmp <- do.call(merge_phyloseq, ps_list)
+saveRDS(ps_tmp, "ps_family_1-50.rds")
+
+```
+
+```{r}
+ps_mtg <- readRDS("../data/mtg/ps_rle_nooutliers.rds")
+ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
+ps_16s <- readRDS("../data/16s/ps_dds.rds")
+taxa_names(ps_16s) <- ps_16s@tax_table[,2]
+
+#add tax table cause it's missing
+ps_not_norm_comp <- readRDS("../data/16s/ps_DeSeq_pass_min_postDD_min0.03.rds")
+tax_table(ps_16s) <- ps_not_norm_comp@tax_table
+
+ps_mtt <- readRDS("../data/mtt/ps_rle_nooutliers.rds")
+ps_metabol <- readRDS("../data/metabol/ps_tmm_nooutliers_fixedmapping.rds")
+```
+
+# Aggregating sequence counts by 99% similarity
+```{r}
+# I think there is an issue with too many zeros, and it's not sufficient to just filter for prevalence. To test, I'm going to aggregate by species annotation. Later, I'll aggregate by actual sequence similarity
+
+ps_species <- tax_glom(ps_16s, taxrank = "Species")
+
+```
+
+
+# Dirichlet Multinomial MTG
+````{r, fig.width = 12}
+
+getCorrelationsMetadata <- function(ps, fit, n){
+  best <- fit[[n]]
+  mixturewt(best)
+  head(mixture(best), n)
+  thetas <- data.frame(mixture(best))
+  rownames(thetas) == sample_names(ps@sam_data)
+  
+  df <- data.frame(cbind(thetas, ps@sam_data))
+  df$stool_freq <- as.numeric(ps@sam_data$stool_freq)
+  df$cat <- as.integer(ps@sam_data$cat)
+  df$phenotype <- as.integer(ifelse(ps@sam_data$phenotype == "A", 1, 0))
+  df$csection <- as.integer(as.logical(ps@sam_data$csection))
+  colnames(df)[1:n] <- paste0("topic", seq(1, n))
+  topics <- colnames(df)[1:n]
+  
+  control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "phenotype", "probiotic", "csection")
+    
+  correlations <- lapply(topics, function(topic){
+    print(topic)
+    cor_res <- lapply(control_variables, function(x){
+      print(x)
+      tmp <- df[!is.na(df[ , x]), ]
+      return(cor.test(tmp[, topic], tmp[, x], method = "spearman"))
+    })
+    pvals <- unlist(lapply(cor_res, function(x) return(x$p.value)))
+    names(pvals) <- control_variables
+    rvals <- unlist(lapply(cor_res, function(x) return(x$estimate)))
+    names(rvals) <- control_variables
+    p_adj <- p.adjust(pvals, method = "fdr")
+    print(sum(p_adj < .05) / length(p_adj))
+    print(control_variables[p_adj < 0.05 & abs(rvals) > 0.1])
+    return(list(rvals = rvals, p_adj = p_adj))
+  })
+  names(correlations) <- topics
+  
+  rvals_mat <- do.call(rbind, lapply(correlations, function(x){ return(x$rvals)}))
+  return(rvals_mat)
+}
+
+
+#fit <- mclapply(1:4, dmn, count= t(ps@otu_table), verbose=TRUE)
+#saveRDS(fit, "dirichlet_fit_16s.rds")
+fit <- readRDS("dirichlet_fit_16s.rds")
+rvals_16s <- getCorrelationsMetadata(ps_16s, fit, n = 3)
+
+#fit <- mclapply(1:7, dmn, count= t(ps@otu_table), verbose=TRUE)
+#saveRDS(fit, "dirichlet_fit_mtg.rds")
+fit <- readRDS("dirichlet_fit_mtg.rds")
+rvals_mtg <- getCorrelationsMetadata(ps_mtg, fit, n = 4)
+
+
+fit <- readRDS("dirichlet_multinomial_mtt.rds")
+rvals_mtt <- getCorrelationsMetadata(ps_mtt, fit, n = 3)
+
+fit <- readRDS("dirichlet_multinomial_metabol.rds")
+rvals_metabol <- getCorrelationsMetadata(ps_metabol, fit, n = 3)
+
+pheatmap(rvals_16s)
+pheatmap(rvals_mtg)
+pheatmap(rvals_mtt)
+pheatmap(rvals_metabol)
+```
+
+# Match up topics
+```{r}
+getCorrelations <- function(mat1, mat2){
+  corr_vals = 
+  matrix(
+    NA,
+    nrow = nrow(mat1), 
+    ncol = nrow(mat2)
+    )
+  
+  p_vals = 
+  matrix(
+    NA,
+    nrow = nrow(mat1), 
+    ncol = nrow(mat2)
+    )
+  
+  for(i in 1:nrow(mat1)) {
+   for(j in 1:nrow(mat2)) {
+    corr_vals[i,j] = 
+      cor.test(mat1[i,], mat2[j, ], method = "spearman")$estimate
+    p_vals[i,j] = 
+      cor.test(mat1[i,], mat2[j, ], method = "spearman")$p.value
+   }
+  }
+  return(list(corr_vals = corr_vals, p_vals = p_vals))
+}
+
+
+cor_16s_mtg <- getCorrelations(rvals_16s, rvals_mtg)
+cor_16s_mtt <- getCorrelations(rvals_16s, rvals_mtt)
+cor_16s_met <- getCorrelations(rvals_16s, rvals_metabol)
+
+cor_mtg_mtt <- getCorrelations(rvals_mtg, rvals_mtt)
+cor_mtg_met <- getCorrelations(rvals_mtg, rvals_metabol)
+
+cor_mtt_met <- getCorrelations(rvals_mtt, rvals_metabol)
+
+print("16s vs mtg")
+cor_16s_mtg$p_vals < .05 & cor_16s_mtg$corr_vals > 0
+print("16s vs mtt")
+cor_16s_mtt$p_vals < .05 & cor_16s_mtt$corr_vals > 0
+print("16s vs metabol")
+cor_16s_met$p_vals < .05 & cor_16s_met$corr_vals > 0
+
+print("mtg vs metabol")
+cor_mtg_met$p_vals < .05 & cor_mtg_met$corr_vals > 0
+print("mtt vs metabol")
+cor_mtt_met$p_vals < .05 & cor_mtt_met$corr_vals > 0
+
+# 16s Topic2 matches mtg, mtt, metabol topic 1
+# 16s Topic3 matches mtg, mtt topic 2
+# 16s Topic3 matches metabol topic 2
+
+rvals_16s_t <- rvals_16s[c(2, 3), ]
+rvals_mtg_t <- rvals_mtg[c(1, 2), ]
+rvals_mtt_t <- rvals_mtt[c(1, 2), ]
+rvals_metabol_t <- rvals_metabol[c(2), , drop = F]
+
+
+# Check to make sure our new matrices have diagonals that match
+
+getCorrelations(rvals_16s_t, rvals_mtg_t)
+
+
+getCorrelations(rvals_mtg_t, rvals_mtt_t)
+
+
+getCorrelations(rvals_16s_t, rvals_metabol_t)
+
+```
+# Metadata correlation visualization combined
+```{r, fig.width = 12}
+df <- data.frame(topic1_16s = rvals_16s_t[1, ],
+                 topic1_mtg = rvals_mtg_t[1, ],
+                 topic1_mtt = rvals_mtt_t[1, ],
+                 topic2_metabol = rvals_metabol_t[1,],
+                 topic2_16s = rvals_16s_t[2, ],
+                 topic2_mtg = rvals_mtg_t[2, ],
+                 topic2_mtt = rvals_mtt_t[2, ])
+
+pheatmap(df)
+```
+
+```{r}
+p3 <- fitted(fit[[3]], scale=TRUE)
+
+```
+
+
+
+
+# Taxa Contributions to topics 1 and 2
+```{r, fig.width = 13}
+# taxa that contribute most to the topics are those that change the most between a model with a single topic and the best model with 3 topics
+fit <- readRDS("dirichlet_fit_16s.rds")
+ps <- ps_16s
+p0 <- fitted(fit[[1]], scale=TRUE)
+p3 <- fitted(fit[[3]], scale=TRUE)
+p3 <- p3[ , c(2,3, 1)]
+colnames(p3) <- paste("topic", 1:3, sep="")
+(meandiff <- colSums(abs(p3 - as.vector(p0))))
+diff <- rowSums(abs(p3 - as.vector(p0))) #Different between taxa contributions to topic as compared to base model
+o <- order(diff, decreasing=TRUE)
+cdiff <- cumsum(diff[o]) / sum(diff)
+df <- head(cbind(Mean=p0[o], p3[o,], importance=diff[o], cdiff), 30) 
+taxa_strings <- data.frame(ps_16s@tax_table)[rownames(df), ]
+taxa_strings <- apply(taxa_strings, 1, function(x) return(paste(x, collapse = "-")))
+taxa_strings <- gsub("d__Bacteria-p__[^>]+c__", "", taxa_strings)
+
+rownames(df) <- taxa_strings[rownames(df)]
+pheatmap(df[ , c("topic1", "topic2", "topic3", "importance")], size = 2, fontsize_row = 12, fontsize_col = 12, cluster_cols = F, cluster_rows = T)
+```
+
+# Gene Contributions to topics 1 and 2
+```{r}
+# taxa that contribute most to the topics are those that change the most between a model with a single topic and the best model with 3 topics
+fit <- readRDS("dirichlet_fit_mtg.rds")
+ps <- ps_mtg
+p0 <- fitted(fit[[1]], scale=TRUE)
+best <- 4
+p_fin <- fitted(fit[[best]], scale=TRUE)
+
+#Rearrange to match 16s topics
+p_fin <- p_fin[, c(1,2, 3, 4)]
+colnames(p_fin) <- paste("topic", 1:4, sep="")
+
+
+
+(meandiff <- colSums(abs(p_fin - as.vector(p0))))
+diff <- rowSums(abs(p_fin - as.vector(p0)))
+o <- order(diff, decreasing=TRUE)
+cdiff <- cumsum(diff[o]) / sum(diff)
+df <- head(cbind(Mean=p0[o], p_fin[o,], importance=diff[o], cdiff), 20)
+taxa_strings <- data.frame(ps@tax_table)[rownames(df), ]
+taxa_strings <- apply(taxa_strings, 1, function(x) return(paste(x, collapse = "-")))
+
+rownames(df) <- taxa_strings[rownames(df)]
+pheatmap(df[ , c("topic1", "topic2", "topic3", "topic4", "importance")], size = 2, fontsize_row = 10, fontsize_col = 10, cluster_cols = F, cluster_rows = F)
+```
+
+# Gene Contributions to topics 1 and 2
+```{r}
+# taxa that contribute most to the topics are those that change the most between a model with a single topic and the best model with 3 topics
+fit <- readRDS("dirichlet_multinomial_mtt.rds")
+ps <- ps_mtt
+p0 <- fitted(fit[[1]], scale=TRUE)
+best <- 3
+p_fin <- fitted(fit[[best]], scale=TRUE)
+
+#Rearrange to match 16s topics
+p_fin <- p_fin[, c(1,2,3)]
+colnames(p_fin) <- paste("topic", 1:3, sep="")
+
+
+
+(meandiff <- colSums(abs(p_fin - as.vector(p0))))
+diff <- rowSums(abs(p_fin - as.vector(p0)))
+o <- order(diff, decreasing=TRUE)
+cdiff <- cumsum(diff[o]) / sum(diff)
+df <- head(cbind(Mean=p0[o], p_fin[o,], importance=diff[o], cdiff), 20)
+taxa_strings <- data.frame(ps@tax_table)[rownames(df), ]
+taxa_strings <- apply(taxa_strings, 1, function(x) return(paste(x, collapse = "-")))
+
+rownames(df) <- taxa_strings[rownames(df)]
+pheatmap(df[ , c("topic1", "topic2", "topic3", "importance")], size = 2, fontsize_row = 10, fontsize_col = 10, cluster_cols = F, cluster_rows = F)
+```
+
+# Metabolite Contributions to topics 1 and 2
+```{r, fig.width = 12}
+# taxa that contribute most to the topics are those that change the most between a model with a single topic and the best model with 3 topics
+fit <- readRDS("dirichlet_multinomial_metabol.rds")
+ps <- ps_metabol
+p0 <- fitted(fit[[1]], scale=TRUE)
+best <- 3
+p_fin <- fitted(fit[[best]], scale=TRUE)
+
+#Rearrange to match 16s topics
+p_fin <- p_fin[, c(1, 2, 3), drop = F]
+colnames(p_fin) <- paste("topic", 1:3, sep="")
+
+
+
+(meandiff <- colSums(abs(p_fin - as.vector(p0))))
+diff <- rowSums(abs(p_fin - as.vector(p0)))
+o <- order(diff, decreasing=TRUE)
+#o <- order(p_fin[ , "m2"], decreasing = TRUE)
+cdiff <- cumsum(diff[o]) / sum(diff)
+df <- head(cbind(Mean=p0[o], p_fin[o,], importance=diff[o], cdiff), 20)
+
+taxa_strings <- data.frame(ps@tax_table)[rownames(df), ]
+taxa_strings <- apply(taxa_strings, 1, function(x) return(paste(x, collapse = "-")))
+
+rownames(df) <- taxa_strings[rownames(df)]
+pheatmap(df[ , c("topic1", "topic2", "topic3", "importance")], size = 2, fontsize_row = 10, fontsize_col = 10, cluster_cols = F, cluster_rows = T)
+```
+# How good are topics at explaining phenotype?
+```{r, fig.width = 12, fig.height= 10}
+fit <- readRDS("dirichlet_fit_16s.rds")
+thetas_16s <- mixture(fit[[3]])
+
+fit <- readRDS("dirichlet_fit_mtg.rds")
+thetas_mtg <- mixture(fit[[4]])
+
+fit <- readRDS("dirichlet_multinomial_mtt.rds")
+thetas_mtt <- mixture(fit[[3]])
+
+fit <- readRDS("dirichlet_multinomial_metabol.rds")
+thetas_metabol <- mixture(fit[[3]])
+
+samples <- intersect(rownames(thetas_metabol), intersect(rownames(thetas_mtt), intersect(rownames(thetas_16s), rownames(thetas_mtg))))
+
+df <- data.frame(cbind(thetas_16s[samples, ], thetas_mtg[samples, ], thetas_mtt[samples, ], thetas_metabol[samples, ]))
+colnames(df) <- c(paste("16s_topic", seq(1,3), sep = "_"), paste("mtg_topic ", seq(1,4), sep = "_"), paste("mtt_topic ", seq(1, 3), sep = "_"), paste("metabol_topic ", seq(1,3), sep = "_"))
+
+phen <- data.frame('phenotype' = ps_16s@sam_data[rownames(df), 'phenotype'])
+
+pheatmap(df[ , c(2,4,8,3,5,9,12)], annotation_row = phen, cluster_cols = F)
+
+
+
+#If you first split people into their topics (enterotypes) can you then differentiate between them of the basis of other things?
+
+#You can't really because that's not how the topics all line up. One person can have different topics per omic
+
+```
+# quick little classifier
+```{r}
+df$phenotype <- phen$phenotype
+df$phenotype <- ifelse(df$phenotype == "A", 1, 0)
+df <- df[ , colnames(df) != "familyID"]
+fit <- glm(phenotype ~ ., data = df, family = "binomial")
+summary(fit)
+probs <- predict(fit, newdata = df)
+preds <- probs > 0
+sum(preds == df$phenotype) / length(preds)
+
+tmp <- roc(df$phenotype, probs)
+plot(tmp)
+
+# STILL can't classify
+```
+
+
+```{r}
+
+#Generative classifier
+count <- t(ps_16s@otu_table)
+pheno <- ps_16s@sam_data$phenotype
+bestgrp <- dmngroup(count, pheno, k = 1:5, verbose =T)
+bestgrp
+
+xtabs(~pheno + predict(bestgrp, count, assign=TRUE))
+
+xval <- cvdmngroup(nrow(count), count, c(A=2, N=3), pheno, verbose =T)
+
+bst <- roc(pheno[rownames(count)] == "A", predict(bestgrp, count)[,"A"])
+bst$Label <- "Single"
+two <- roc(pheno[rownames(xval)] == "A" , xval[,"A"])
+two$Label <- "Two group"
+both <- rbind(bst, two)
+pars <- list(superpose.line=list(col=.qualitative[1:2], lwd=2))
+
+xyplot(TruePostive ~ FalsePositive, group=Label, both,
++ type="l", par.settings=pars,
++ auto.key=list(lines=TRUE, points=FALSE, x=.6, y=.1),
++ xlab="False Positive", ylab="True Positive")
+
+
+```
+
+# Stan learning
+```{r}
+ps_species <- tax_glom(ps_16s, taxrank = "Species")
+#ps_16s <- ps_species
+x <- t(get_taxa(ps_species))
+x <- round(x)
+print(dim(x))
+
+num_topics = 3
+
+
+stan_data <- list(
+  K = num_topics,
+  V = ncol(x),
+  D = nrow(x),
+  n = x,
+  alpha = rep(1, num_topics),
+  gamma = rep(0.5, ncol(x))
+)
+
+
+#lda modeling
+f <- stan_model(file = "lda_counts.stan")
+
+time_start <- Sys.time()
+stan_vb <- vb(
+  f,
+  data = stan_data,
+  output_samples = 20,
+  tol_rel_obj = 0.001,
+  seed = 1,
+  iter = 20
+)
+time_end <- Sys.time()
+print(time_end - time_start)
+
+
+# Consider using sampling instead
+# Takes WAY too long, although may be a longer term solution
+
+#There were 4 chains where the estimated Bayesian Fraction of Missing Information was low. See
+#https://mc-stan.org/misc/warnings.html#bfmi-lowExamine the pairs() plot to diagnose sampling problems
+#The largest R-hat is NA, indicating chains have not mixed.
+#Running the chains for more iterations may help. See
+##https://mc-stan.org/misc/warnings.html#r-hatBulk Effective Samples Size (ESS) is too low, indicating posterior means and medians may be unreliable.
+#Running the chains for more iterations may help. See
+#https://mc-stan.org/misc/warnings.html#bulk-essTail Effective Samples Size (ESS) is too low, indicating posterior variances and tail quantiles may be unreliable.
+#Running the chains for more iterations may help. See
+#https://mc-stan.org/misc/warnings.html#tail-ess
+time_start <- Sys.time()
+stan_sampling <- sampling(
+  f, 
+  data = stan_data,
+  warmup = 50,
+  iter = 500
+)
+time_end <- Sys.time()
+print(time_end - time_start)
+
+
+
+stan_vb_sample <- rstan::extract(stan_vb)$beta
+
+#modResults = stan("lda_counts.stan", data= stan_data, iter=2500, warmup=100, control = list(max_treedepth = 15))
+```
+
+
+
+```{r}
+
+
+
+pairs(modResults, pars = c("y", "x[1]", "lp__"), las = 1) # below the diagonal
+```
+
+
+```{r}
+ps_16s <- ps_species
+x <- t(get_taxa(ps_16s))
+x <- round(x)
+
+print(dim(x))
+#thresh <- 0.07
+#keep <- apply(x, 2, function(y) return(sum(y > 0) > (thresh * nrow(x))))
+#x <- as.matrix(x[ , keep])
+print(dim(x))
+
+num_topics = 5
+stan_data <- list(
+  K = num_topics,
+  V = ncol(x),
+  D = nrow(x),
+  n = x,
+  alpha = rep(1, num_topics),
+  gamma = rep(0.5, ncol(x))
+)
+
+#lda modeling
+f <- stan_model(file = "lda_counts.stan")
+stan_fit <- vb(
+  f,
+  data = stan_data,
+  output_samples = 1000,
+  eta = 1,
+  adapt_engaged = FALSE
+)
+
+
+# What about packages that already exist to learn Dirichlet algorithms
+
+samples <- rstan::extract(stan_fit)
+```
+
+# Extract Beta (rsv distributions per topic)
+```{r}
+library(dplyr)
+## ---- extract_beta ----
+# underlying RSV distributions
+beta_logit_2 <- samples$beta
+
+for (i in seq_len(nrow(beta_logit_2))) {
+  for (k in seq_len(stan_data$K)) {
+    beta_logit_2[i, k, ] <- log(beta_logit_2[i, k, ])
+    beta_logit_2[i, k, ] <- beta_logit_2[i, k, ] - mean(beta_logit_2[i, k, ])
+  }
+}
+
+beta_hat_2 <- beta_logit_2 %>%
+  melt(
+    varnames = c("iterations", "topic", "rsv_ix"),
+    value.name = "beta_logit"
+  ) %>%
+  as_data_frame()
+
+beta_hat_2$rsv <- rownames(tax_table(ps_16s))[beta_hat_2$rsv_ix]
+taxa <- as_data_frame(tax_table(ps_16s)@.Data)
+taxa$rsv <- rownames(tax_table(ps_16s))
+
+beta_hat_2 <- beta_hat_2 %>%
+  left_join(taxa) %>%
+  mutate(
+    topic = paste("Topic", topic)
+  )
+
+beta_hat_2$rsv <- factor(beta_hat_2$rsv, levels = taxa$rsv)
+
+# beta hat is a vector of word probabilities per topic. We also have iterations in this dataframe. Maybe we take the last one?
+```
+
+# Extract theta (topic distribution per sample)
+```{r, fig.width = 13}
+## ---- extract_theta ----
+theta_logit_2 <- samples$theta
+for (i in seq_len(nrow(theta_logit_2))) {
+  for (d in seq_len(stan_data$D)) {
+    theta_logit_2[i, d, ] <- log(theta_logit_2[i, d, ])
+    theta_logit_2[i, d, ] <- theta_logit_2[i, d, ] - mean(theta_logit_2[i, d, ])
+  }
+}
+
+theta_hat_2 <- theta_logit_2 %>%
+  melt(
+    varnames = c("iteration", "sample", "topic"),
+    value.name = "theta_logit_2"
+  )
+
+theta_hat_2$sample <- sample_names(ps_16s)[theta_hat_2$sample]
+sample_info <- sample_data(ps_16s)
+sample_info$sample <- rownames(sample_info)
+theta_hat_2$topic <- paste("Topic", theta_hat_2$topic)
+
+theta_hat_2 <- theta_hat_2 %>%
+  left_join(sample_info, by = "sample")
+
+## ---- visualize_lda_theta_heatmap ----
+plot_opts <- list(
+  "x" = "red",
+  "y" = "blue",
+  "fill" = "mean_theta",
+  "y_order" = paste("Topic", stan_data$K:1)
+)
+df <- theta_hat_2 %>%
+  group_by(topic, host_name) %>%
+  summarise(mean_theta = mean(theta_logit_2, na.rm = TRUE))
+
+library("heatmaply")
+
+
+
+```
+# Check goodness of fit
+```{r}
+source("../../microbiome_plvm-master/src/antibiotics-study/posterior_check_funs.R")
+# The idea is to check how well the simulated samples (drawn from the topic fit) match the actual samples
+
+# Option 1: look at co-intertial analysis to see how far away simulated samples are from real samples
+
+```
+
+# Check goodness of fit from paper
+```{r}
+posterior_checks_input <- function(x, x_sim, ps, file_basename = NULL) {
+  q_sim <- apply(asinh(x_sim), 1, quantile, seq(0, 1, 0.01))  %>%
+    melt(
+      varnames = c("q_ix", "iteration"),
+      value.name = "q"
+    ) %>%
+    as_data_frame()
+
+  mx <- x %>%
+    melt(
+      varnames = c("sample", "rsv"),
+      value.name = "truth"
+    ) %>%
+    as_data_frame()
+
+  mx_samples <- mx
+  mx_samples$sample_id  <- sample_names(ps)[mx_samples$sample]
+
+  ## show taxa chosen randomly among those present in >= 45% of samples
+  keep_taxa <- sample(seq(dim(x_sim)[3]), 10)
+  m_sim <- x_sim[,, keep_taxa] %>%
+    melt(
+      varnames = c("iteration", "sample", "rsv"),
+      value.name = "sim_value"
+    ) %>%
+    as_data_frame()
+  m_sim$rsv <- taxa_names(ps)[m_sim$rsv]
+  m_sim$sample <- sample_names(ps)[m_sim$sample]
+
+  mx_samples <- mx_samples %>%
+    filter(rsv %in% taxa_names(ps)[keep_taxa]) %>%
+    left_join(
+      cbind(
+        sample_id = sample_names(ps),
+        as_data_frame(sample_data(ps))
+      )
+    ) %>%
+    left_join(m_sim)
+
+  # Get Procrustes scores
+  pca_taxa <- order(apply(asinh(x), 2, var), decreasing = TRUE)[1: min(nrow(x), ncol(x))]
+
+  scores_data <- sample_summary_fun(
+    asinh(t(x[, pca_taxa])),
+    aperm(asinh(x_sim[,, pca_taxa]), c(1, 3, 2)),
+    scores_summary,
+    list("K" = 2)
+  )
+  
+  loadings_data <- sample_summary_fun(
+    asinh(t(x[, pca_taxa])),
+    aperm(asinh(x_sim[,, pca_taxa]), c(1, 3, 2)),
+    loadings_summary,
+    list("K" = 2)
+  )
+
+  evals_data <- sample_summary_fun(
+    asinh(t(x[, pca_taxa])),
+    aperm(asinh(x_sim[,, pca_taxa]), c(1, 3, 2)),
+    evals_summary,
+    list()
+  )
+
+
+  input_data <- list(
+    "q_sim" = q_sim,
+    "mx" = mx,
+    "mx_samples" = mx_samples,
+    "scores_data" = scores_data,
+    "loadings_data" = loadings_data,
+    "evals_data" = evals_data
+  )
+
+  if (!is.null(file_basename)) {
+    for (i in seq_along(input_data)) {
+      write_feather(
+        input_data[[i]],
+        sprintf(
+          "%s-%s.feather",
+          file_basename,
+          names(input_data[i])
+        )
+      )
+    }
+  }
+  input_data
+}
+
+checks_data <- posterior_checks_input(
+  x = x,
+  x_sim = samples$x_sim,
+  ps = ps_16s,
+  sprintf("../results/latent_variable_modeling/figure-input/lda")
+)
+
+# From posterior_checks.R
+getwd()
+input_paths <- list.files("../results/latent_variable_modeling/figure-input/", full.names = TRUE)
+print(input_paths)
+input_data <- lapply(
+  input_paths,
+  read_feather
+)
+
+library("tidyr")
+input_types <- data_frame(
+  basename = gsub("\\.feather", "", basename(input_paths))
+) %>%
+  separate(basename, c("method", "subject", "data"), "-")
+
+input_types$data <- input_types$subject
+input_types$subject <- rep("F", nrow(input_types))
+
+data_types<- unique(input_types$data)
+merged_data <- list()
+for (i in seq_along(data_types)) {
+  cur_ix <- which(input_types$data == data_types[i])
+  cur_data <- list()
+  for (j in seq_along(cur_ix)) {
+    cur_data[[j]] <- input_data[[cur_ix[j]]]
+    cur_data[[j]]$method <- input_types$method[cur_ix[j]]
+  }
+  merged_data[[data_types[i]]] <- do.call(rbind, cur_data)
+}
+
+p <- posterior_checks_plots(merged_data)
+```
+
+![alt text here](../results/latent_variable_modeling/quantile_example)
+
+```{r}
+p$quantiles
+```
+![alt text here](../results/latent_variable_modeling/eigenvalue_examples)
+```{r}
+p$evals 
+```
+
+![alt text here](../results/latent_variable_modeling/scores_loadings_example.PNG)
+```{r}
+p$scores
+p$loadings
+
+```
+
+
+# Plotting topics - are any topics related to phenotypes?
+```{r, fig.width = 12}
+library(ggpubr)
+# By family panel
+tmp <- theta_hat_2[theta_hat_2$familyID %in% unique(theta_hat_2$familyID)[1:10], ]
+p <- ggplot(tmp) +
+  geom_boxplot(
+    aes(x = as.factor(host_name), y = theta_logit_2, fill = phenotype),
+    #fill = "#C9C9C9",
+    outlier.size = 0.05,
+    size = 0.1,
+    notchwidth = 0.1,
+    position = position_dodge(width = 0)
+  ) +
+  scale_y_continuous(breaks = scales::pretty_breaks(3)) +
+  #min_theme(list(border_size = 0.7, text_size = 10, subtitle_size = 11)) +
+  facet_grid(topic ~ familyID, scales = "free_x", space = "free_x") +
+  geom_hline(yintercept = 0, alpha = 0.4, size = 0.5, col = "#999999") +
+  labs(x = "Host Name", y = expression(paste("g(", theta[k], ")"))) +
+  theme(legend.position = "none") +
+  scale_x_discrete(breaks = seq(1, 60, by = 10) - 1)
+p
+
+# By aggregated phenotype
+p <- ggplot(theta_hat_2, aes(x = as.factor(phenotype), y = theta_logit_2, fill = phenotype)) +
+  geom_boxplot(
+    outlier.size = 0.05,
+    size = 0.1,
+    notchwidth = 0.1,
+    position = position_dodge(width = 0)
+  ) +
+  #geom_jitter(width = 0.1) + 
+  scale_y_continuous(breaks = scales::pretty_breaks(3)) +
+  #min_theme(list(border_size = 0.7, text_size = 10, subtitle_size = 11)) +
+  facet_grid(~topic, scales = "free_x", space = "free_x") +
+  geom_hline(yintercept = 0, alpha = 0.4, size = 0.5, col = "#999999") +
+  labs(x = "Host Name", y = expression(paste("g(", theta[k], ")"))) +
+  theme(legend.position = "none") +
+  scale_x_discrete(breaks = seq(1, 60, by = 10) - 1)
+p + stat_compare_means(method = "t.test") + stat_compare_means(vjust = 1.5)
+
+
+
+# How variable are topics across the same individual
+tmp <- tmp[order(tmp$biospecimen_name, tmp$timepoint), ]
+ggplot(tmp, aes(x = biospecimen_name, y = theta_logit_2, fill = phenotype)) +
+  geom_boxplot(
+    outlier.size = 0.05,
+    size = 0.1,
+    notchwidth = 0.1,
+    position = position_dodge(width = 0)
+  ) +
+  facet_grid(topic ~ familyID, scales = "free_x", space = "free_x")+
+  geom_hline(yintercept = 0, alpha = 0.4, size = 0.5, col = "#999999") +
+  labs(x = "Host Name", y = expression(paste("g(", theta[k], ")"))) +
+  theme(legend.position = "none") +
+  scale_x_discrete(breaks = seq(1, 60, by = 10) - 1)
+  
+# Should we maybe analyses only families where participants are internally consistent for a topic 
+```
+
+# Differences in topic distribution between siblings
+```{r, fig.width= 12}
+tmp <- theta_hat_2
+print(dim(tmp))
+# Complete families only
+keep <- names(table(tmp$familyID))[table(tmp$familyID) == 17928]
+tmp <- tmp[tmp$familyID %in% keep, ]
+print(dim(tmp))
+
+#inconsistency with family 187
+tmp <- tmp[tmp$familyID != 187, ]
+print(dim(tmp))
+
+tmp_grpd <- tmp %>% group_by(sample, topic) %>% summarize(theta_mean = mean(theta_logit_2))
+tmp_grpd
+aut <- tmp[tmp$phenotype == "A", ]
+nt <- tmp[tmp$phenotype == "N", ]
+sample_ids_aut <- unique(aut$sample)
+sample_ids_nt <- gsub("A", "N", sample_ids_aut)
+
+
+paired <- cbind(tmp_grpd[tmp_grpd$sample %in% sample_ids_aut, ], tmp_grpd[tmp_grpd$sample %in% sample_ids_nt, ])
+colnames(paired) <- c("sample_name_aut", "topic_aut", "theta_aut", "sample_name_nt", "topic_nt", "theta_nt")
+paired$difference <- paired$theta_aut - paired$theta_nt
+
+ggplot(data = paired, aes(x = difference)) + geom_histogram() + facet_grid(~topic_aut)
+
+paired_grpd <- paired %>% group_by(topic_aut) %>% summarize(diff = difference)
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 1"] %>% t.test()
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 2"] %>% t.test()
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 3"] %>% t.test()
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 4"] %>% t.test()
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 5"] %>% t.test()
+paired_grpd$diff[paired_grpd$topic_aut == "Topic 6"] %>% t.test()
+```
+
+# Correlation of topics with metadata
+```{r}
+library(pheatmap)
+df <- theta_hat_2
+df$stool_freq <- as.numeric(df$stool_freq)
+df$csection <- as.integer(df$csection)
+df$cat <- as.integer(df$cat)
+df$phenotype <- as.integer(ifelse(df$phenotype == "A", 1, 0))
+topics <- paste0("Topic ", seq(1,5))
+
+control_variables <- c("whole_grain", "fermented_vegetables", "dairy", "fruit", "meal_home_prep", "meal_ready_eat", "meat", "olive_oil", "seafood", "sweetened_drink", "vegetable", "restaurant", "sugary_food", "starchy_food", "dairy_freq", "fat_oil_freq", "vegetable_freq", "fruit_freq", "csection", "phenotype")
+  
+correlations <- lapply(topics, function(topic){
+  print(topic)
+  cor_res <- lapply(control_variables, function(x){
+    return(cor.test(df$theta_logit_2[df$topic == topic ], df[df$topic == topic, x], method = "spearman"))
+  })
+  pvals <- unlist(lapply(cor_res, function(x) return(x$p.value)))
+  names(pvals) <- control_variables
+  rvals <- unlist(lapply(cor_res, function(x) return(x$estimate)))
+  names(rvals) <- control_variables
+  p_adj <- p.adjust(pvals, method = "fdr")
+  print(sum(p_adj < .05) / length(p_adj))
+  print(control_variables[p_adj < 0.05 & abs(rvals) > 0.1])
+  return(list(rvals = rvals, p_adj = p_adj))
+})
+names(correlations) <- topics
+
+rvals_mat <- do.call(rbind, lapply(correlations, function(x){ return(x$rvals)}))
+pheatmap(rvals_mat)  
+
+
+
+# negative control
+#cor.test(df$theta_logit_2[df$topic == topic ], sample(seq(0, 10000), length(df$theta_logit_2[df$topic == topic ]), replace = T), method = "spearman")
+```
