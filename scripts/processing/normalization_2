@@ -53,6 +53,35 @@ tmmNorm <- function(ps){
   return(ps)
 }
 
+
+rleNorm_man <- function(ps){
+  counts <- ps@otu_table
+  #1. Log transform all counts
+  counts_log <- log(counts)
+  
+  #2. Average across all samples to get a gene average in your dataset. This vector has p elements, one for each gene. Average of log values is not easily swayed by outliers, which is nice
+  gene_averages <- apply(counts_log, 1, mean)
+  
+  #3. To calculate the scaling factors for each sample, drop all genes that have 0 read counts in any sample. If you have a single 0, you will drop the gene!  The thought is that the scaling factors will be focused on housekeeping genes, that should be transcribed at similar levels across all tissues and samples. 
+  keep <- apply(counts, 1, function(x) return(sum(x == 0) ==0))
+  housekeeping_counts <- counts_log[keep, ]
+  housekeeping_gene_averages <- gene_averages[keep]
+  
+  #4. Subtract gene averages from gene counts (mean center). BOTH OF THESE ARE LOGGED. Which means you’re actually doing log( gene count / mean gene count), or looking at the ratio of that samples gene count in comparison to the rest of the samples.
+  norm_factors_tmp <- housekeeping_counts - housekeeping_gene_averages
+  
+  #5. Calculate the median of all log centered values per sample. Again, we use the median to give more power to moderately expressed and house keeping genes
+  norm_factors_tmp2 <- apply(norm_factors_tmp, 2, median)
+  
+  #6. Convert the medians from step 5 into real numbers again by taking e^value. This will be your scaling factor. Go divide original read counts (not logged) by this scaling factor per sample.
+  norm_factors <- exp(norm_factors_tmp2)
+  
+  counts_rle <- t(t(counts) / norm_factors)
+  
+  ps@otu_table <- counts_rle
+  return(ps)
+}
+
 rleNorm <- function(ps, scale = F){
   if(scale){
     s = 10000
@@ -159,12 +188,12 @@ runNormalizations <- function(ps_raw, omic, scale = F){
   
   ps_rle <- rleNorm(ps_raw, scale)
   saveRDS(ps_rle, paste0("../data/", omic, "/ps_rle.rds"))
-  ps_css <- cssNorm(ps_raw)
-  saveRDS(ps_css, paste0("../data/", omic, "/ps_css.rds"))
-  ps_dds <- deSeqNorm(ps_raw, scale)
-  saveRDS(ps_dds, paste0("../data/", omic, "/ps_dds.rds"))
-  ps_tmm <- tmmNorm(ps_raw)
-  saveRDS(ps_tmm, paste0("../data/", omic, "/ps_tmm.rds"))
+  #ps_css <- cssNorm(ps_raw)
+  #saveRDS(ps_css, paste0("../data/", omic, "/ps_css.rds"))
+  #ps_dds <- deSeqNorm(ps_raw, scale)
+  #saveRDS(ps_dds, paste0("../data/", omic, "/ps_dds.rds"))
+  #ps_tmm <- tmmNorm(ps_raw)
+  #saveRDS(ps_tmm, paste0("../data/", omic, "/ps_tmm.rds"))
   #ps_clr <- clrNorm(ps_raw)
   #saveRDS(ps_clr, paste0("../data/", omic, "/ps_clr.rds"))
 }
@@ -259,13 +288,14 @@ p <- displayPlot(omic)
 p
 ggsave(paste0("../results/summary_statistics/normalizations/", omic, "normtest.pdf"))
 
-omic = "metabol"
+omic = "mbx"
 ps_metabol <- readRDS(paste0("../data/", omic, "/ps_clean.rds"))
 
 # Going back to original scale data
 mbx <- read.csv("~/Lab/M3/data/mbx/metabolomics_data_orgi_scale.csv", row.names = 1)
 mbx[is.na(mbx)] <- 0
 # need to make the numbers smaller or they overflow the integer value
+
 # Scale each metabolite to be median 1
 #mbx <- t(apply(mbx, 1, function(x) return(x / (sd(x)))))
 mbx <- mbx[, ps_metabol@sam_data$biospecimen_id]
@@ -273,19 +303,27 @@ mbx <- mbx[, ps_metabol@sam_data$biospecimen_id]
 colnames(mbx) <- ps_metabol@sam_data$biospecimen_name
 colnames(mbx) <- gsub("F", "P", colnames(mbx))
 ps_mbx <- phyloseq(otu_table(mbx, taxa_are_rows = T), sample_data(ps_metabol@sam_data), tax_table(ps_metabol@tax_table))
-hist(apply(ps_mbx@otu_table, 1, max), main = "max count present for that metabolite")
-hist(apply(ps_mbx@otu_table, 2, max), main = "max count present in each sample", breaks = 20)
-hist(sample_sums(ps_mbx))
+#hist(apply(ps_mbx@otu_table, 1, max), main = "max count present for that metabolite")
+#hist(apply(ps_mbx@otu_table, 2, max), main = "max count present in each sample", breaks = 20)
+#hist(sample_sums(ps_mbx))
 
-# mean scale each metabolite on top of rle
-counts <- ps_mbx@otu_table
+# first rle norm
+ps_rle <- rleNorm(ps_mbx)
+
+# then, mean scale each metabolite on top of rle
+counts <- ps_rle@otu_table
+counts_adj <- apply(counts, 1, function(x) return(log(x)*9))
+#counts_adj <- apply(counts, 1, function(x) return(x / (mean(x)/30)))
+counts_adj[1:10, 1:10]
 
 ps_mbx_real <- readRDS("../data/mbx/ps_mbx_rle_nooutliers_adjcounts_fixedmapping.rds")
-ps_mbx_real@otu_table[1:10, 1:10]
-counts[1:10, 1:10]
+t(ps_mbx_real@otu_table[1:10, 1:10])
 
-counts_adj <- apply(counts, 2, function(x) return(x / median(x)))
-counts_adj[1:10, 1:10]
+
+
+
+
+
 
 runNormalizations(ps_mbx, omic, scale = F)
 runRatioTest(omic, comparison = "sib")
