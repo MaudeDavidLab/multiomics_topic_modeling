@@ -1,0 +1,7 @@
+INFO [2021-08-24 15:40:11] $x
+INFO [2021-08-24 15:40:11] list(samples_16s, samples_mtg, samples_mtt, samples_metabol)
+INFO [2021-08-24 15:40:11] 
+INFO [2021-08-24 15:40:11] $filename
+INFO [2021-08-24 15:40:11] [1] "results/summary_statistics/venn_diagram.png"
+INFO [2021-08-24 15:40:11] 
+ERROR [2021-08-24 15:40:11] Unexpected parameter length for 'category'

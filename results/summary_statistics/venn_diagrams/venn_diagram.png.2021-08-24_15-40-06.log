@@ -1,0 +1,6 @@
+INFO [2021-08-24 15:40:06] $x
+INFO [2021-08-24 15:40:06] list(samples_16s, samples_mtg, samples_mtt, sample_metabol)
+INFO [2021-08-24 15:40:06] 
+INFO [2021-08-24 15:40:06] $filename
+INFO [2021-08-24 15:40:06] [1] "results/summary_statistics/venn_diagram.png"
+INFO [2021-08-24 15:40:06] 

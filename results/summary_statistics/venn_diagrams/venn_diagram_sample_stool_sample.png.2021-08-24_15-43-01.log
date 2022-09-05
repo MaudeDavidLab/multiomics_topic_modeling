@@ -1,0 +1,9 @@
+INFO [2021-08-24 15:43:01] $x
+INFO [2021-08-24 15:43:01] list(samples_16s, samples_mtg, samples_mtt, samples_metabol)
+INFO [2021-08-24 15:43:01] 
+INFO [2021-08-24 15:43:01] $category.names
+INFO [2021-08-24 15:43:01] c("16s", "mtg", "mtt", "metabol")
+INFO [2021-08-24 15:43:01] 
+INFO [2021-08-24 15:43:01] $filename
+INFO [2021-08-24 15:43:01] [1] "results/summary_statistics/venn_diagram_sample_stool_sample.png"
+INFO [2021-08-24 15:43:01] 
