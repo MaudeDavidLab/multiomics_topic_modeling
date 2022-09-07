@@ -21,10 +21,19 @@ Raw data files available upon request.
 
 ### D. Prevalence filtering was performed using the "Filter" chunk of script ```lda/latent_dirichlet_allocation_3```
 
-# 3. Topic modeling
-# 4. Clustering topics
-# 5. Interpreting topics
-# 6. Clustering samples
-# 7. Differential analysis
+# 3. Train topic models using scripts ```lda/train_models.R``` to train the models and ```lda/train_models.sh``` to submit training jobs to a server.
+### A. Evaluate the models by creating simulated data from each model, then comparing sample quantile, feature quantile, and marginal pairwise distribution between simulated and true data using script ```lda/model_evaluation.R```
 
+# 4. Clustering topics into cross-omic topics using the "Cluster topics" chunk of script ```lda/latent_dirichlet_allocation_3```
 
+# 5. Interpret topics based on high feature weights using the "Feature Weights MBX/MTG/MTT/16s" chunks of script ```lda/latent_dirichlet_allocation_3```.
+These chunks create data for Figure 2 in the manuscript, which is the post-processed manually for a cleaner visualization.
+
+# 6. Cluster samples using the "Full heatmap" chunck of script ```lda/latent_dirichlet_allocation_3```
+
+# 7. Differential analysis using the "MBX/MTG/MTT/16s differences between groups" chunks of script ```lda/latent_dirichlet_allocation_3```
+These chunks produce Figure 3 in the manuscript
+
+### script ```lda/latent_dirichlet_allocation_3``` also produced all supplementary figures in the manuscript, with the exception of the model_evaluation, which is produced by the model_evalutation.R script.
+
+* Please direct all question about reproducing code to ctataru15@gmail.com
