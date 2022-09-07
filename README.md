@@ -10,7 +10,16 @@ Raw data files available upon request.
 - mtt/PS_kegg_fun_MTT.rds
 - mbx/metabolomics_data_orgi_scale.csv
 
-## B. Normalizations were tested and selected using the script ```normalization_choices.R```
+## B. Metadata was cleaned and standardized using the script ```metadata/clean_mapping_ml.R``` 
+
+
+## C. Normalizations were tested and selected using the script ```processing/normalization_choices.R``` to create the files:
+- 16s/ps_16s_dds_taxannotation.rds
+- mtg/ps_mtg_rle_nooutliers_adjcounts.rds
+- mtt/ps_mtt_rle_nooutliers_adjcounts.rds
+- mbx/ps_mbx_rle_nooutliers_adjcounts_fixedmapping.rds
+
+### D. Prevalence filtering was performed using the "Filter" chunk of script ```lda/latent_dirichlet_allocation_3```
 
 # 3. Topic modeling
 # 4. Clustering topics
