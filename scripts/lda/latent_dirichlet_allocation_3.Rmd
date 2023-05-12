@@ -28,6 +28,15 @@ source("lda_helper_functions.R")
 library(ggplotify)
 library(Hmisc)
 library(gridExtra)
+
+
+# lda packages
+library(tm)
+library(slam)
+library(topicmodels)
+library(reshape2)
+library(dplyr)
+library(LDATS)
 ```
 
 
@@ -38,6 +47,15 @@ ps_mtg@sam_data$familyID <- as.character(ps_mtg@sam_data$familyID)
 ps_16s <- readRDS("../../data/16s/ps_16s_dds_taxannotation.rds")
 ps_mtt <- readRDS("../../data/mtt/ps_mtt_rle_nooutliers_adjcounts.rds")
 ps_mbx <- readRDS("../../data/mbx/ps_mbx_rle_nooutliers_adjcounts_fixedmapping.rds")
+```
+
+# get ids for publication
+```{r}
+ids <- unique(c(ps_mtg@sam_data$biospecimen_id, ps_16s@sam_data$biospecimen_id, ps_mtt@sam_data$biospecimen_id))
+print(length(ids))
+
+sum(ids %in% ps_16s@sam_data$biospecimen_id) + sum(ids %in% ps_mtg@sam_data$biospecimen_id) + sum(ids %in% ps_mtt@sam_data$biospecimen_id) 
+# we should have a total of 827 records
 ```
 
 
@@ -63,8 +81,293 @@ ps_mtt_filt <- filterByPrevalence(ps_mtt, 0.1)
 ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
 ```
 
-# Simulate counts
+# Remove overlapping samples from topic training objects
 ```{r}
+samples <- intersect(sample_names(ps_mbx_filt), intersect(sample_names(ps_mtt_filt), intersect(sample_names(ps_16s_filt), sample_names(ps_mtg_filt))))
+
+ps_16s_tm <- prune_samples(!sample_names(ps_16s_filt) %in% samples, ps_16s_filt)
+ps_mtg_tm <- prune_samples(!sample_names(ps_mtg_filt) %in% samples, ps_mtg_filt)
+ps_mtt_tm <- prune_samples(!sample_names(ps_mtt_filt) %in% samples, ps_mtt_filt)
+ps_mbx_tm <- prune_samples(!sample_names(ps_mbx_filt) %in% samples, ps_mbx_filt)
+```
+
+
+# Train LDA model
+```{r}
+getLDAInput <- function(ps){
+  data.final <- t(round(ps@otu_table))
+  dtm=as.simple_triplet_matrix(data.final)
+  print(dim(dtm))
+  return(dtm)
+}
+
+trainModel <- function(ps, num_topics, iter){
+  print("making input")
+  dtm <- getLDAInput(ps)
+  print("finished making input")
+  
+  # label using molecule names
+  matched <- match(colnames(dtm), taxa_names(ps))
+  colnames(dtm) == taxa_names(ps)[matched]
+  colnames(dtm) <- as.character(ps@tax_table[matched, 1])
+  print("Added labels")
+  
+  #Train model
+  seed_num = 0
+  print("Beginning training...")
+  print(num_topics)
+  control = list(seed = seed_num, burnin = 40, iter = iter, verbose=10, keep = 1)
+  model <- LDA(dtm, k = num_topics, method = "Gibbs", control = control)
+  print("Finished training...")
+  
+  print(length(model@logLiks))
+  plot(seq(1, length(model@logLiks)), model@logLiks)
+  return(model)
+}
+
+```
+
+
+
+
+#saveRDS(model, output_file)
+
+```{r}
+model_mbx_unique_samples <- trainModel(ps_mbx_tm, num_topics = 7, iter = 1000)
+for(num_topics in seq(2, 10)){
+  print(num_topics)
+  iter = 1000
+  model_mbx_unique_samples <- trainModel(ps_mbx_tm, num_topics = num_topics, iter = iter)
+  saveRDS(model_mbx_unique_samples, paste0("../../results/latent_variable_modeling/models/mbx_models_unique_samples/model_mbx_", num_topics, "topics_", iter, "iter_0.1filter", ".rds"))
+}
+
+#model_mtt_unique_samples <- trainModel(ps_mtt_tm, num_topics = 4, iter = 500)
+for(num_topics in seq(2, 10)){
+  print(num_topics)
+  iter = 2000
+  model_mtt_unique_samples <- trainModel(ps_mtt_tm, num_topics = num_topics, iter = iter)
+  saveRDS(model_mtt_unique_samples, paste0("../../results/latent_variable_modeling/models/mtt_models_unique_samples/model_mtt_", num_topics, "topics_", iter, "iter_0.1filter", ".rds"))
+}
+
+#model_mtg_unique_samples <- trainModel(ps_mtg_tm, num_topics = 5, iter = 500)
+for(num_topics in seq(2, 10)){
+  print(num_topics)
+  iter = 2000
+  model_mtg_unique_samples <- trainModel(ps_mtg_tm, num_topics = num_topics, iter = iter)
+  saveRDS(model_mtg_unique_samples, paste0("../../results/latent_variable_modeling/models/mtg_models_unique_samples/model_mtg_", num_topics, "topics_", iter, "iter_0.1filter", ".rds"))
+}
+
+
+
+
+ps_16s_tm <- prune_samples(!sample_names(ps_16s_filt) %in% samples, ps_16s_filt)
+ps_16s_tm_1 <- prune_samples(ps_16s_tm@sam_data$timepoint == "Timepoint 1", ps_16s_tm)
+ps_16s_tm_2 <- prune_samples(ps_16s_tm@sam_data$timepoint == "Timepoint 2", ps_16s_tm)
+ps_16s_tm_3 <- prune_samples(ps_16s_tm@sam_data$timepoint == "Timepoint 3", ps_16s_tm)
+for(num_topics in seq(2, 20)){
+  print(num_topics)
+  iter = 1000
+  model_16s_unique_samples <- trainModel(ps_16s_tm_3, num_topics = num_topics, iter = iter)
+  saveRDS(model_16s_unique_samples, paste0("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint3/model_16s_", num_topics, "topics_", iter, "iter_0.05filter", ".rds"))
+}
+
+
+
+
+
+```
+
+# compare models
+```{r, fig.width = 10, fig.height = 8}
+
+compareModelsAcrossSamples <- function(model1, model2, ps1, ps2, num_topics){
+  thetas1 <- model1@gamma
+  thetas2 <- model2@gamma
+  rownames(thetas1) <- sample_names(ps1)
+  rownames(thetas2) <- sample_names(ps2)
+  
+  # compare based on correlation with the samples that overlap. model has all the samples, model_tm has all the samples - the 81
+  samples <- intersect(sample_names(ps1), sample_names(ps2))
+  ps1 <- prune_samples(samples, ps1)
+  ps2 <- prune_samples(samples, ps2)
+  colnames(thetas1) <- paste("Topic from model1", seq(1,num_topics))
+  colnames(thetas2) <- paste("Topic from model2", seq(1,num_topics))
+  thetas1 <- thetas1[samples, ]
+  thetas2 <- thetas2[samples, ]
+  
+  df <- data.frame(cbind(thetas1, thetas2))
+  pheatmap(df)
+  return(list(thetas1 = thetas1, thetas2 = thetas2))
+  
+}
+
+
+compareModelsAcrossFeatures <- function(model1, model2, ps1, ps2, num_topics){
+  betas1 <- exp(model1@beta)[!is.na(rowSums(model1@beta)), ]
+  print(dim(betas1))
+  colnames(betas1) <- taxa_names(ps1)
+  rownames(betas1) <- paste("Topic from model1", seq(1, num_topics))
+  
+  betas2 <- exp(model2@beta)[!is.na(rowSums(model2@beta)), ]
+  print(dim(betas2))
+  colnames(betas2) <- taxa_names(ps2)
+  rownames(betas2) <- paste("Topic from model2", seq(1, num_topics))
+  
+  df <- data.frame(rbind(betas1, betas2))
+  pheatmap(df)
+  return(list(betas1 = betas1, betas2 = betas2))
+}
+
+
+
+# correlation of topics across models
+compareModelsCorrletionWithOtherTopics <- function(betas1, betas2){
+  correlations <- apply(betas1, 1, function(x){
+    correlation <- apply(betas2, 1, function(y, x){
+       cor(x, y, method = "spearman")
+    }, x)
+    return(correlation)
+  })
+  pheatmap(correlations)
+}
+```
+
+# Compare MBX model using unique samples to original MBX model
+```{r}
+model_mbx_final <- readRDS("../../results/latent_variable_modeling/models/mbx_models_50000//model_mbx_7topics_50000iter_0.1filter.rds")
+model_mbx_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mbx_models_unique_samples/model_mbx_7topics_200iter_0.1filter.rds")
+tmp <- compareModelsAcrossSamples(model_mbx_unique_samples, model_mbx_final, ps_mbx_tm, ps_mbx_filt, num_topics= 7)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model_mbx_unique_samples, model_mbx_final, ps_mbx_tm, ps_mbx_filt, num_topics= 7)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+```
+
+# Compare 16s model using unique samples to original 16s model
+```{r, fig.width = 8, fig.heigh = 6}
+model_16s_final <- readRDS("../../results/latent_variable_modeling/models/16s_models_50000/model_16s_4topics_50000iter_0.05filter.rds")
+model_16s_unique_samples <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/model_16s_4topics_10000iter_0.05filter.rds")
+tmp <- compareModelsAcrossSamples(model_16s_unique_samples, model_16s_final, ps_16s_tm, ps_16s_filt, num_topics = 4)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model_16s_unique_samples, model_16s_final, ps_16s_tm, ps_16s_filt, num_topics = 4)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+
+
+# comparing timepoint 1 with timepoint 2
+model_16s_time2 <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint2/model_16s_4topics_1000iter_0.05filter.rds")
+model_16s_time1 <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint1/model_16s_4topics_1000iter_0.05filter.rds")
+
+sample_names(ps_16s_tm_1) <- gsub("_P._", "",sample_names(ps_16s_tm_1))
+sample_names(ps_16s_tm_2) <- gsub("_P._", "", sample_names(ps_16s_tm_2))
+tmp <- compareModelsAcrossSamples(model1 = model_16s_time1, model2 = model_16s_time2, ps1 = ps_16s_tm_1, ps2 = ps_16s_tm_2, num_topics = 4)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model1 = model_16s_time1, model2 = model_16s_time2, ps1 = ps_16s_tm_1, ps2 = ps_16s_tm_2, num_topics = 4)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+
+
+# comparing timepoint 1 with timepoint 2
+model_16s_time3 <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint3/model_16s_4topics_1000iter_0.05filter.rds")
+model_16s_time1 <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint1/model_16s_4topics_1000iter_0.05filter.rds")
+
+sample_names(ps_16s_tm_1) <- gsub("_P._", "",sample_names(ps_16s_tm_1))
+sample_names(ps_16s_tm_3) <- gsub("_P._", "", sample_names(ps_16s_tm_3))
+tmp <- compareModelsAcrossSamples(model1 = model_16s_time1, model2 = model_16s_time3, ps1 = ps_16s_tm_1, ps2 = ps_16s_tm_3, num_topics = 4)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model1 = model_16s_time1, model2 = model_16s_time3, ps1 = ps_16s_tm_1, ps2 = ps_16s_tm_3, num_topics = 4)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+
+
+# How do topics change per person
+thetas_16s_1 <- getPosteriors(prune_samples(samples, ps_16s_filt), model_16s_time1)
+thetas_16s_2 <- getPosteriors(prune_samples(samples, ps_16s_filt), model_16s_time2)
+thetas_16s_3 <- getPosteriors(prune_samples(samples, ps_16s_filt), model_16s_time3)
+
+df <- data.frame(rbind(thetas_16s_1, thetas_16s_2, thetas_16s_3))
+# do an ordination
+
+mapping <- data.frame(c(rep("timepoint1", nrow(thetas_16s_1)), rep("timepoint2", nrow(thetas_16s_2)), rep("timepoint3", nrow(thetas_16s_3))))
+rownames(mapping) <- rownames(df)
+colnames(mapping) <- "timepoint"
+mapping$timepoint <- as.factor(mapping$timepoint)
+mapping$sample <- df$sample
+mapping
+
+chosen_samples <- sample(samples, 15)
+df$sample <- c(rownames(thetas_16s_1), rownames(thetas_16s_2), rownames(thetas_16s_3))
+mapping$sample <- df$sample
+df <- df[df$sample %in% chosen_samples, ]
+mapping <- mapping[df$sample %in% chosen_samples, ]
+df <- df %>% select(-c("sample"))
+ps <- phyloseq(otu_table(df, taxa_are_rows= F), sample_data(mapping))
+ord <- ordinate(ps)
+plot_ordination(ps, ord, type = "samples", color = "sample", shape = "timepoint") + geom_point(size = 5) + ggtitle("Is there a consistent effect of timepoint on topic distribution? No") + theme_bw()
+
+
+
+df$sample <- c(rownames(thetas_16s_1), rownames(thetas_16s_2), rownames(thetas_16s_3))
+df$timepoint <- c(rep("timepoint1", nrow(thetas_16s_1)), rep("timepoint2", nrow(thetas_16s_2)), rep("timepoint3", nrow(thetas_16s_3)))
+chosen_samples <- sample(samples, 5)
+df <- df[df$sample %in% chosen_samples, ]
+
+#mapping <- data.frame(c(rep("timepoint1", nrow(thetas_16s_1)), rep("timepoint2", nrow(thetas_16s_2)), rep("timepoint3", nrow(thetas_16s_3))))
+#rownames(mapping) <- rownames(df)
+#colnames(mapping) <- "timepoint"
+#mapping$timepoint <- as.factor(mapping$timepoint)
+
+df <- melt(df)
+ggplot(df, aes(x = variable, y = value))+
+  geom_boxplot()+
+  facet_grid(sample~timepoint)
+```
+
+# Compare MTG model using unique samples to original MTG model
+```{r}
+model_mtg_final <- readRDS("../../results/latent_variable_modeling/models//mtg_models_50000/model_mtg_5topics_50000iter_0.1filter.rds")
+model_mtg_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mtg_model_unique_samples.rds")
+tmp <- compareModelsAcrossSamples(model_mtg_unique_samples, model_mtg_final, ps_mtg_tm, ps_mtg_filt, num_topics = 5)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model_mtg_unique_samples, model_mtg_final, ps_mtg_tm, ps_mtg_filt, num_topics = 5)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+```
+
+
+# Compare MTT model using unique samples to original MTG model
+```{r}
+model_mtt_final <- readRDS("../../results/latent_variable_modeling/models//mtt_models_50000/model_mtt_4topics_50000iter_0.1filter.rds")
+model_mtt_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mtt_model_unique_samples.rds")
+tmp <- compareModelsAcrossSamples(model_mtt_unique_samples, model_mtt_final, ps_mtt_tm, ps_mtt_filt, num_topics = 4)
+thetas1 <- tmp$thetas1
+thetas2 <- tmp$thetas2
+tmp <- compareModelsAcrossFeatures(model_mtt_unique_samples, model_mtt_final, ps_mtt_tm, ps_mtt_filt, num_topics = 4)
+betas1 <- tmp$betas1
+betas2 <- tmp$betas2
+compareModelsCorrletionWithOtherTopics(betas1, betas2)
+compareModelsCorrletionWithOtherTopics(t(thetas1), t(thetas2))
+```
+
+
+
+# Simulate counts
+```{r, eval = F}
 model_16s <- readRDS("../results/latent_variable_modeling/16s_models/model_16s_10topics_10000iter_0.05filter.rds")
 sim_counts_16s <- getSimulatedDataset(ps_16s_filt, model_16s, n = "sample_counts")
 saveRDS(sim_counts_16s, "sim_counts_16s_10topics.rds")
@@ -100,9 +403,9 @@ plotModelFit <- function(ps, sim_counts, suffix){
 }
 ```
 
-
-```{r, fig.width = 3, fig.height = 2}
-
+# Get Quantile Correlations
+```{r, fig.width = 3, fig.height = 2, eval = F}
+source("lda_helper_functions.R")
 
 getQuantileCorrelations <- function(ps, directory, title, sim = F, iteration, divisor = 1){
   files <- list.files(directory)
@@ -155,7 +458,10 @@ plotQuantileCorrelations <- function(directory, title){
   })
   df <- do.call(rbind, dfs)
   df <- melt(df, id.vars = c("numTopics"))
+  df <-df[df$numTopics <= 14, ]
   delta <- 0.05
+  grouped <- df %>% group_by(variable, numTopics) %>% summarise(mean = mean(value))
+  grouped <- grouped[grouped$numTopics <= 14, ]
   
   names_facets <- list(
   'r2s_samples'="Correlations Quantile Samples",
@@ -200,50 +506,96 @@ plotQuantileCorrelations <- function(directory, title){
   #  xlab("Number of Topics") + ylab("R^2")+
   #  ggtitle(paste(title, "Pairwise Marginal Dist. Correlation"))+ ylim(c(min(df$pmdc) - delta, max(df$pmdc) + delta))
 
-  return(p)
+  return(list(p, grouped))
 }
 
+
 getwd()
-for(i in seq(1, 10)){
-  getQuantileCorrelations(ps_16s_filt, "../../results/latent_variable_modeling/models/16s_models_50000/", title = "16s", sim = F, iteration = i)
+for(i in seq(1, 2)){
+  getQuantileCorrelations(ps_16s_tm_1, "../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint1/", title = "16s", sim = T, iteration = i)
 }
 
 #ggsave("../../results/latent_variable_modeling/models/16s_models_50000/quantile_correlation_num_topics.pdf", p_16s, width = 20, height = 3.5)
 
 for(i in seq(1, 3)){
-  getQuantileCorrelations(ps_mtg_filt, "../../results/latent_variable_modeling/models/mtg_models_50000/sim/", title = "mtg", sim = F, iteration = i)
+  getQuantileCorrelations(ps_mtg_tm, "../../results/latent_variable_modeling/models/mtg_models_unique_samples/", title = "mtg", sim = T, iteration = i, divisor = 1)
 }
 #ggsave("../../results/latent_variable_modeling/models/mtg_models_50000/quantile_correlation_num_topics.pdf", p_mtg, width = 20, height = 3.5)
 
 
-for(i in seq(1, 10)){
-  getQuantileCorrelations(ps_mtt_filt, "../../results/latent_variable_modeling/models/mtt_models_50000/", title = "mtt", sim = F, iteration = i)
+for(i in seq(1, 3)){
+  getQuantileCorrelations(ps_mtt_tm, "../../results/latent_variable_modeling/models/mtt_models_unique_samples/", title = "mtt", sim = T, iteration = i, divisor = 1)
 }
 
 #ggsave("../../results/latent_variable_modeling/models/mtt_models_50000/quantile_correlation_num_topics.pdf", p_mtt, width = 20, height = 3.5)
 
 
-for(i in seq(1, 2)){
-  getQuantileCorrelations(ps_mbx_filt, "../../results/latent_variable_modeling/models/mbx_models_50000/", title = "MBX", sim = F, iteration = i)
+for(i in seq(1, 3)){
+  getQuantileCorrelations(ps_mbx_tm, "../../results/latent_variable_modeling/models/mbx_models_unique_samples/", title = "MBX", sim = T, iteration = i, divisor = 1)
 }
 
 #ggsave("../../results/latent_variable_modeling/models/mbx_models_50000/quantile_correlation_num_topics.pdf", p_mbx, width = 20, height = 3.5)
 
 ```
 
-```{r, fig.width = 20, fig.height = 10}
-p_16s <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/16s_models_50000/", title = "16s") 
-p_mtg <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mtg_models_50000/", title = "mtg") 
-p_mtt <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mtt_models_50000/", title = "mtt")  
-p_mbx <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mbx_models_50000/", title = "MBX")
-p <- ggarrange(p_16s + ggtitle("16s"), p_mtg + ggtitle("MTG"), p_mtt + ggtitle("MTT"), p_mbx + ggtitle("MBX"), ncol = 1)
 
+```{r, fig.width = 20, fig.height = 10, eval = F}
+tmp <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/16s_models_50000/", title = "16s") 
+p_16s <- tmp[[1]]
+grouped_16s <- tmp[[2]]
+thresh <- max(grouped_16s$mean[grouped_16s$variable == "pmdc"]) * 0.95
+grouped_16s$numTopics[grouped_16s$mean[grouped_16s$variable == "pmdc"] > thresh]# 5 topics
+#plot(diff(grouped_16s$mean[grouped_16s$variable == "pmdc"])) # 3 topics
+#hist(diff(grouped_16s$mean[grouped_16s$variable == "pmdc"]))
+#14
+
+tmp <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mtg_models_50000/", title = "mtg") 
+p_mtg <- tmp[[1]]
+grouped_mtg <- tmp[[2]] # 3 topics?
+thresh <- max(grouped_mtg$mean[grouped_mtg$variable == "pmdc"]) * 0.94
+grouped_mtg$numTopics[grouped_mtg$mean[grouped_mtg$variable == "pmdc"] > thresh]# 4 topics
+#plot(diff(grouped_mtg$mean[grouped_mtg$variable == "pmdc"])) # 4 or 5 topics
+#10
+
+tmp <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mtt_models_50000/", title = "mtt") 
+p_mtt <- tmp[[1]]
+grouped_mtt <- tmp[[2]]
+thresh <- max(grouped_mtt$mean[grouped_mtt$variable == "pmdc"]) * 0.94
+grouped_mtt$numTopics[grouped_mtt$mean[grouped_mtt$variable == "pmdc"] > thresh]# 3 topics
+#max(grouped_mtt$mean[grouped_mtt$variable == "pmdc"]) * 0.85 # 4 topics
+#4
+
+tmp <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/models/mbx_models_50000/", title = "MBX")
+p_mbx <- tmp[[1]]
+grouped_mbx <- tmp[[2]] # 4 topics
+thresh <- max(grouped_mbx$mean[grouped_mbx$variable == "pmdc"]) * 0.95
+grouped_mbx$numTopics[grouped_mbx$mean[grouped_mbx$variable == "pmdc"] > thresh]# 4 topics
+#plot(diff(grouped_mbx$mean[grouped_mbx$variable == "pmdc"])) # first two differences are noticeably bigger
+#8
+
+p <- ggarrange(p_16s + ggtitle("16s"), p_mtg + ggtitle("MTG"), p_mtt + ggtitle("MTT"), p_mbx + ggtitle("MBX"), ncol = 1)
+p
 ggsave("../../results/latent_variable_modeling/models/model_selection.pdf", p, height = 10, width = 20)
 ggsave("../../results/latent_variable_modeling/models/model_selection.png", p, height = 10, width = 20)
+
+
+
+# derivatives
+diff(grouped_16s$mean)[grouped_16s$variable == "pmdc"] #.025, .018 => .02 # 8 topics
+diff(grouped_mtg$mean[grouped_mtg$variable == "pmdc"]) #0.0322625555, .002=> .03 # 5 topics
+diff(grouped_mtt$mean[grouped_mtt$variable == "pmdc"]) #.0401 => .04 # 4 topics
+diff(grouped_mbx$mean[grouped_mbx$variable == "pmdc"]) #0.0250981837 => .008 # 7 topics
+
+
+# per topic added, we must increase fit at least 1% of the total max
+diff(grouped_16s$mean)[grouped_16s$variable == "pmdc"] / max(grouped_16s$mean[grouped_16s$variable == "pmdc"])
+diff(grouped_mtg$mean)[grouped_mtg$variable == "pmdc"] / max(grouped_mtg$mean[grouped_mtg$variable == "pmdc"])
+diff(grouped_mtt$mean)[grouped_mtt$variable == "pmdc"] / max(grouped_mtt$mean[grouped_mtt$variable == "pmdc"])
+diff(grouped_mbx$mean)[grouped_mbx$variable == "pmdc"] / max(grouped_mbx$mean[grouped_mbx$variable == "pmdc"])
 ```
 
 # Null models
-```{r}
+```{r, eval = F}
 for(i in seq(1, 10)){
   getQuantileCorrelations(ps_mbx_filt, "../../results/latent_variable_modeling/mbx_models_null/", title = "MBX", sim = T, iteration = i)
 }
@@ -261,6 +613,7 @@ for(i in seq(1, 10)){
 p_mtt <- plotQuantileCorrelations ( "../../results/latent_variable_modeling/mtt_models_null/", title = "MTT")
 ```
 
+
 # Plot number of topic selection
 ```{r}
 
@@ -276,45 +629,93 @@ model_mtt <- readRDS("../../results/latent_variable_modeling/models//mtt_models_
 model_mbx <- readRDS("../../results/latent_variable_modeling/models/mbx_models_50000//model_mbx_7topics_50000iter_0.1filter.rds")
 
 folder <- "16s-4_mtg-5_mtt-4_mbx-7/"
+
+# maybe we need to do 4 topics for everything...
+```
+
+# New models
+```{r}
+model_16s_unique_samples <- readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/timepoint1/model_16s_14topics_1000iter_0.05filter.rds")
+model_mtg_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mtg_models_unique_samples/model_mtg_10topics_2000iter_0.1filter.rds")
+model_mtt_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mtt_models_unique_samples/model_mtt_4topics_2000iter_0.1filter.rds")
+model_mbx_unique_samples <- readRDS("../../results/latent_variable_modeling/models/mbx_models_unique_samples/model_mbx_8topics_200iter_0.1filter.rds")
+
+model_16s <- model_16s_unique_samples
+model_mtg <- model_mtg_unique_samples
+model_mtt <- model_mtt_unique_samples
+model_mbx <- model_mbx_unique_samples
+
+#ps_16s_filt <- ps_16s_tm
+#ps_mtg_filt <- ps_mtg_tm
+#ps_mtt_filt <- ps_mtt_tm
+#ps_mbx_filt <- ps_mbx_tm
+
+# Get the posterior probabilities of each topic for the 81 samples, not included in topic learning process
+samples <- intersect(sample_names(ps_mbx_filt), intersect(sample_names(ps_mtt_filt), intersect(sample_names(ps_16s_filt), sample_names(ps_mtg_filt))))
+ps_16s_use <- prune_samples(samples, ps_16s_filt)
+ps_mtg_use <- prune_samples(samples, ps_mtg_filt)
+ps_mtt_use <- prune_samples(samples, ps_mtt_filt)
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+
+getPosteriors <- function(ps, model){
+  dtm <- getLDAInput(ps)
+  model@terms <- taxa_names(ps)
+  tmp <- posterior(model, dtm)
+  thetas <- tmp$topics
+  return(thetas)
+}
+
 ```
 
 
+```{r}
+thetas_16s <- getPosteriors(ps_16s_use, model_16s)
+thetas_mtg <- getPosteriors(ps_mtg_use, model_mtg)
+thetas_mtt <- getPosteriors(ps_mtt_use, model_mtt)
+thetas_mbx <- getPosteriors(ps_mbx_use, model_mbx)
+saveRDS(thetas_16s, "../../results/latent_variable_modeling/models/16s_models_unique_samples/thetas_16s_14topics.rds")
+saveRDS(thetas_mtg, "../../results/latent_variable_modeling/models/16s_models_unique_samples/thetas_mtg_10topics.rds")
+saveRDS(thetas_mtt, "../../results/latent_variable_modeling/models/16s_models_unique_samples/thetas_mtt_4topics.rds")
+saveRDS(thetas_mbx, "../../results/latent_variable_modeling/models/16s_models_unique_samples/thetas_mbx_8topics.rds")
+
+```
 
 
 # Line up topics based on shared distributions across samples
 ```{r}
-clusterTopics <- function(model_16s, model_mtg, model_mtt, model_mbx, k, remove_mtt = T){
-  thetas_16s <- model_16s@gamma
-  rownames(thetas_16s) <- sample_names(ps_16s_filt)
-  betas_16s <- model_16s@beta
+clusterTopics <- function(thetas_16s, thetas_mtg, thetas_mtt, thetas_mbx,
+                          betas_16s, betas_mtg, betas_mtt, betas_mbx, k, remove_mtt = T){
+  #thetas_16s <- model_16s@gamma
+  #rownames(thetas_16s) <- sample_names(ps_16s_filt)
+  #betas_16s <- model_16s@beta
   tax <- data.frame(ps_16s_filt@tax_table)
   colnames(betas_16s) <- paste( tax[,3], tax[,4], tax[,5], tax[,6])
   #thetas_16s <- apply(thetas_16s, 2, function(x) return((x - mean(x)) / sd(x)))
     
-  thetas_mtg <- model_mtg@gamma
-  rownames(thetas_mtg) <- sample_names(ps_mtg_filt)
-  betas_mtg <- model_mtg@beta
+  #thetas_mtg <- model_mtg@gamma
+  #rownames(thetas_mtg) <- sample_names(ps_mtg_filt)
+  #betas_mtg <- model_mtg@beta
   tax <- data.frame(ps_mtg_filt@tax_table)
   colnames(betas_mtg) <- tax[,2]
   #thetas_mtg <- apply(thetas_mtg, 2, function(x) return((x - mean(x)) / sd(x)))
   
-  thetas_mtt <- model_mtt@gamma
-  rownames(thetas_mtt) <- sample_names(ps_mtt_filt)
-  betas_mtt <- model_mtt@beta
+  #thetas_mtt <- model_mtt@gamma
+  #rownames(thetas_mtt) <- sample_names(ps_mtt_filt)
+  #betas_mtt <- model_mtt@beta
   tax <- data.frame(ps_mtt_filt@tax_table)
   colnames(betas_mtt) <- tax[,2]
   if(remove_mtt){
-     betas_mtt <- betas_mtt[colSums(thetas_mtt) < 120, ]
-     thetas_mtt <- thetas_mtt[ , colSums(thetas_mtt) <120]
+     betas_mtt <- betas_mtt[colSums(thetas_mtt) < 60, ]
+     thetas_mtt <- thetas_mtt[ , colSums(thetas_mtt) <60]
   }
 
   
   #
   #thetas_mtt <- apply(thetas_mtt, 2, function(x) return((x - mean(x)) / sd(x)))
   
-  thetas_mbx <- model_mbx@gamma
-  rownames(thetas_mbx) <- sample_names(ps_mbx_filt)
-  betas_mbx <- model_mbx@beta
+  #thetas_mbx <- model_mbx@gamma
+  #rownames(thetas_mbx) <- sample_names(ps_mbx_filt)
+  #betas_mbx <- model_mbx@beta
   tax <- data.frame(ps_mbx_filt@tax_table)
   colnames(betas_mbx) <- tax[ , 2]
   #thetas_mbx <- apply(thetas_mbx, 2, function(x) return((x - mean(x)) / sd(x)))
@@ -377,8 +778,9 @@ clusterTopics <- function(model_16s, model_mtg, model_mtt, model_mbx, k, remove_
 
 ```
 
+
 # select number of clusters
-```{r, fig.heigth = 4, fig.width = 4}
+```{r, fig.heigth = 10, fig.width = 10}
 getDistanceRatiosCluster <- function(df, n, m = 1){
   # n = number of topic clusters
   if(m == 1){
@@ -404,41 +806,66 @@ getDistanceRatiosCluster <- function(df, n, m = 1){
   gap_stats <- intra_dist/inter_dist
   return(mean(gap_stats, na.rm = T))
 }
-gap_stats <- sapply(seq(2, 10), function(i){
-  tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = i)
+gap_stats <- sapply(seq(2, 15), function(i){
+  tmp <- clusterTopics(thetas_16s, thetas_mtg, thetas_mtt, thetas_mbx,
+                          betas_16s, betas_mtg, betas_mtt, betas_mbx, k = i)
   gap_stat <- getDistanceRatiosCluster(tmp$df, n = i, m= 1)
   return(gap_stat)
 })
-df <- data.frame(x = seq(2, 10), gap_stats = gap_stats)
+df <- data.frame(x = seq(2, 15), gap_stats = gap_stats)
 p_man <- ggplot(df, aes(x = x, y = gap_stats))+geom_point() + theme_bw()+xlab("")
 
 
-gap_stats <- sapply(seq(2, 10), function(i){
-  tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = i)
+gap_stats <- sapply(seq(2, 15), function(i){
+  tmp <- clusterTopics(thetas_16s, thetas_mtg, thetas_mtt, thetas_mbx,
+                          betas_16s, betas_mtg, betas_mtt, betas_mbx, k = i)
   gap_stat <- getDistanceRatiosCluster(tmp$df, n = i, m = 2)
   return(gap_stat)
 })
-df <- data.frame(x = seq(2, 10), gap_stats = gap_stats)
+df <- data.frame(x = seq(2, 15), gap_stats = gap_stats)
 p_euclidean <- ggplot(df, aes(x = x, y = gap_stats))+geom_point() + theme_bw()+xlab("")
 
-gap_stats <- sapply(seq(2, 10), function(i){
-  tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = i)
+gap_stats <- sapply(seq(2, 15), function(i){
+  tmp <- clusterTopics(thetas_16s, thetas_mtg, thetas_mtt, thetas_mbx,
+                          betas_16s, betas_mtg, betas_mtt, betas_mbx, k = i)
   gap_stat <- getDistanceRatiosCluster(tmp$df, n = i, m = 3)
   return(gap_stat)
 })
-df <- data.frame(x = seq(2, 10), gap_stats = gap_stats)
+df <- data.frame(x = seq(2, 15), gap_stats = gap_stats)
 p_corr <- ggplot(df, aes(x = x, y = gap_stats))+geom_point() + theme_bw()+xlab("")
 
 
 p_gapstats <- ggarrange(plotlist = list(p_man, p_euclidean, p_corr), ncol=3)
 
-
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/number_clusters_topics.pdf"), p_gapstats, width = 7, height = 1.5)
+p_gapstats
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/number_clusters_topics.pdf"), p_gapstats, width = 7, height = 1.5)
 ```
 
 # Cluster topics
 ```{r}
-tmp <- clusterTopics(model_16s, model_mtg, model_mtt, model_mbx, k = 4, remove_mtt = F)
+betas_16s <- exp(model_16s@beta)
+betas_mtg <- exp(model_mtg@beta)
+betas_mtt <- exp(model_mtt@beta)
+betas_mbx <- exp(model_mbx@beta)
+
+# comment out for old models
+#thetas_16s <-  readRDS("../../results/latent_variable_modeling/models/16s_models_unique_samples/thetas_16s_5topics.rds")
+#thetas_mtg <- readRDS("../../results/latent_variable_modeling/models/mtg_models_unique_samples/thetas_mtg_4topics.rds")
+#thetas_mtt <- readRDS("../../results/latent_variable_modeling/models/mtt_models_unique_samples/thetas_mtt_3topics.rds")
+#thetas_mbx <-  readRDS("../../results/latent_variable_modeling/models/mbx_models_unique_samples/thetas_mbx_4topics.rds")
+
+# commment out for new models
+thetas_16s <- model_16s@gamma
+thetas_mtg <- model_mtg@gamma
+thetas_mtt <- model_mtt@gamma
+thetas_mbx <- model_mbx@gamma
+rownames(thetas_16s) <- sample_names(ps_16s_filt)
+rownames(thetas_mtg) <- sample_names(ps_mtg_filt)
+rownames(thetas_mtt) <- sample_names(ps_mtt_filt)
+rownames(thetas_mbx) <- sample_names(ps_mbx_filt)
+
+tmp <- clusterTopics(thetas_16s, thetas_mtg, thetas_mtt, thetas_mbx,
+                          betas_16s, betas_mtg, betas_mtt, betas_mbx, k = 4, remove_mtt = T)
 df <- tmp$df
 thetas_16s <- tmp$thetas_16s
 thetas_mtg <- tmp$thetas_mtg
@@ -465,8 +892,8 @@ h <- ggplot(df) + geom_bar(aes(x = topic, y = total_topic_weight), stat = "ident
 
 p <- ggarrange(as.ggplot(tmp$p[[4]]), h, scales = c(1, 0.5), widths = c(1, 0.7), labels = "AUTO")
 
-ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_mtt_topic3.pdf", p, width = 10, height = 9)
-ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_mtt_topic3.png", p, width = 10, height = 9)
+#ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_mtt_topic3.pdf", p, width = 10, height = 9)
+#ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_mtt_topic3.png", p, width = 10, height = 9)
 ```
 
 
@@ -493,7 +920,7 @@ p_ordination <- plot_ordination(ps, ord, type = "samples", color= "omic") + geom
 
 plot_ordination(ps, ord, type = "biplot", color = "omic") + theme_bw()
 
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/ordinate_topics.pdf"), p_ordination)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/ordinate_topics.pdf"), p_ordination)
 ```
 
 # Correlation matrix of topics
@@ -508,8 +935,8 @@ df_sig <- rcorr(as.matrix(df))$P< .1
 df_sig[is.na(df_sig)] <- FALSE
 df_annotate <- apply(df_sig, 1, function(x) ifelse(x, "*", ""))
 p_topic_correlation <- pheatmap(correlation, cluster_col = F, cluster_row = F, display_numbers = df_annotate) 
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "correlate_topics.pdf"), p_topic_correlation , width = 5, height = 4)
-
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "correlate_topics.pdf"), p_topic_correlation , width = 5, height = 4)
+p_topic_correlation
 
 #topics <- paste0("topic", seq(1,4))
 #lapply(topics, function(x){
@@ -519,7 +946,7 @@ ggsave(paste0("../../results/latent_variable_modeling/", folder, "correlate_topi
 #})
 ```
 
-
+# Check topic correlations all match
 ```{r}
 topic1 <- df[ , grepl("topic1", colnames(df))]
 cor1 <- apply(topic1, 2, function(x){
@@ -561,6 +988,7 @@ thetas_mtg <- thetas_mtg[ , !colnames(thetas_mtg) %in% c("topic4_MTG")]
 thetas_mtt <- thetas_mtt[ , !colnames(thetas_mtt) %in% c("topic4_MTT")]
 
 #thetas_mbx <- thetas_mbx[ , c(2,3,4)]
+samples <- intersect(intersect(intersect(rownames(thetas_16s), rownames(thetas_mtg)), rownames(thetas_mtt)), rownames(thetas_mbx))
 df <- data.frame(cbind(thetas_16s[samples, ], thetas_mtg[samples, ], thetas_mtt[samples, ], thetas_mbx[samples, ]))
 
 topic1 <- df[ , grepl("topic1", colnames(df))]
@@ -605,28 +1033,28 @@ palette = "Purple-Green"
 width = 4
 
 thetas_16s <- thetas_16s[, !is.na(colSums(thetas_16s))]
-res_16s <- getCorrelationsMetadata(ps_16s_filt, thetas_16s, ending = "16s", n = ncol(thetas_16s))
+res_16s <- getCorrelationsMetadata(ps_16s_use, thetas_16s, ending = "16s", n = ncol(thetas_16s))
 rvals_16s <- res_16s$rvals
 pvals_16s <- res_16s$p_adj
 p <- pheatmap(t(rvals_16s), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
 #ggsave("../../results/latent_variable_modeling/metadata_corr_16s.pdf", p, width = width, height = 6)
 
 thetas_mtg <- thetas_mtg[, !is.na(colSums(thetas_mtg))]
-res_mtg <- getCorrelationsMetadata(ps_mtg_filt, thetas_mtg, ending = "MTG",n = ncol(thetas_mtg))
+res_mtg <- getCorrelationsMetadata(ps_mtg_use, thetas_mtg, ending = "MTG", n = ncol(thetas_mtg))
 rvals_mtg <- res_mtg$rvals
 pvals_mtg <- res_mtg$p_adj
 p <- pheatmap(t(rvals_mtg), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
 #ggsave("../../results/latent_variable_modeling/metadata_corr_mtg.pdf", p, width = width, height = 6)
 
 thetas_mtt <- thetas_mtt[, !is.na(colSums(thetas_mtt))]
-res_mtt <- getCorrelationsMetadata(ps_mtt_filt, thetas_mtt, ending = "MTT", n = ncol(thetas_mtt))
+res_mtt <- getCorrelationsMetadata(ps_mtt_use, thetas_mtt, ending = "MTT", n = ncol(thetas_mtt))
 rvals_mtt <- res_mtt$rvals
 pvals_mtt <- res_mtt$p_adj
 p <- pheatmap(t(rvals_mtt[!is.na(rowSums(rvals_mtt)), ]), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
 #ggsave("../../results/latent_variable_modeling/metadata_corr_mtt.pdf", p, width = width, height = 6)
 
 thetas_mbx <- thetas_mbx[, !is.na(colSums(thetas_mbx))]
-res_mbx <- getCorrelationsMetadata(ps_mbx_filt, thetas_mbx, ending = "MBX", n = ncol(thetas_mbx))
+res_mbx <- getCorrelationsMetadata(ps_mbx_use, thetas_mbx, ending = "MBX", n = ncol(thetas_mbx))
 rvals_mbx <- res_mbx$rvals
 pvals_mbx <- res_mbx$p_adj
 p <- pheatmap(t(rvals_mbx[!is.na(rowSums(rvals_mbx)), ]), cluster_rows = F, color = diverging_hcl(n = 300, palette = palette, rev = T, alpha = 0.8))
@@ -649,7 +1077,7 @@ p_metadata <- pheatmap(t(df_sort), cluster_rows = T, cluster_cols = F,
               display_numbers = df_annotate_sort, angle_col = 45)
 
 metadata_topic_cor <- t(df_sort)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "correlate_metadata_topics.pdf"), p_metadata, width = 6, height = 5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "correlate_metadata_topics.pdf"), p_metadata, width = 6, height = 5)
 
 
 
@@ -675,7 +1103,7 @@ pheatmap(df)
 ```
 
 # Correlate Metadata, postive or negative drivers?
-```{r}
+```{r, eval = F}
 # 1. adonis using healthy as an explanatory variable - 'healthyness' is very significant in how dietary variables relate to microbiome topics
 df_sort_tmp <- data.frame(df_sort)
 df_sort_tmp <- df_sort_tmp %>% select(-c("whole_grain", "olive_oil", "restaurant", "age"))
@@ -706,7 +1134,7 @@ adonis2(df_sort_tmp %>% select(-c("healthy")) ~ df_sort_tmp$healthy, permutation
 ```
 
 # differences in topics between phenotypes
-```{r}
+```{r, eval = F}
 
 tests <- apply(df_phen %>% select(-c("phenotype", "cluster")), 2, function(x){
   x <- unlist(x)
@@ -728,9 +1156,11 @@ col3 <- "blue"
 ```
 
 
+
+
 # Full heatmap
 ```{r, fig.height=10}
-thetas_mtt_tmp <- thetas_mtt[ , colSums(thetas_mtt) <120]
+thetas_mtt_tmp <- thetas_mtt[ , colSums(thetas_mtt) <60]
 samples <- intersect(intersect(intersect(rownames(thetas_16s), rownames(thetas_mtg)), rownames(thetas_mtt)), rownames(thetas_mbx))
 
 # do a full heatmap with summed thetas
@@ -770,9 +1200,83 @@ dim(data2)
 #dim(data4)
 p_heatmap <- p
 getwd()
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/full_heatmap_infographic.pdf"), p, width = 7, height = 12)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/full_heatmap_infographic.pdf"), p, width = 7, height = 12)
 
+#saveRDS(df_phen, file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/df_phen_unique_samples.rds")
+#saveRDS(data1, file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data1_unique_samples.rds")
+#saveRDS(data2, file = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data2_unique_samples.rds")
 ```
+# Cluster using just 16s topics - how do clusters compare to multi-omic clustering?
+```{r}
+df <- data.frame(thetas_16s[samples, ])
+df <- df[, !is.na(colSums(df))]
+phen <- data.frame('phenotype' = ps_16s_filt@sam_data[rownames(df), 'phenotype'])
+phenotype <- c(asd_color, td_color)
+names(phenotype) <- c("A", "N")
+ann_colors <- list(phenotype = phenotype)
+
+#rownames(df) <- paste("Sample", seq(1,nrow(df)))
+#rownames(phen) <- rownames(df)
+p <- pheatmap(t(df), annotation_row = phen, cluster_cols = T, 
+              clustering_distance_rows = 'correlation', clustering_distance_cols = 'correlation',
+              color = diverging_hcl(200, palette = "PurpleGreen",rev = T),
+              #labels_col = rep("", nrow(df)), 
+              annotation_colors = ann_colors)
+
+clustering <- cutree(p$tree_col, k = 2)
+names(clustering) == rownames(df)
+
+
+
+df_phen_16s <- df
+df_phen_16s$phenotype <- phen$phenotype
+df_phen_16s$phenotype <- ifelse(df_phen_16s$phenotype == "A", 1, 0)
+
+data1_16s <- df_phen_16s[clustering == 1, ]
+data2_16s <- df_phen_16s[clustering == 2, ]
+
+
+
+rownames(data1) %in% rownames(data1_16s)
+x = list(all_omics = rownames(data1), taxa = rownames(data1_16s))
+ggvenn(x)
+
+rownames(data2) %in% rownames(data2_16s)
+x = list(all_omics = rownames(data2), taxa = rownames(data2_16s))
+ggvenn(x)
+
+# 3 samples get flipped groups, which is interesting! means you couple probably sub-type with just topics not multi-omics
+```
+
+# How different is group membership
+```{r}
+library(ggvenn)
+data1_all <- readRDS("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data1_all_samples.rds")
+data1_unique <- readRDS("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data1_unique_samples.rds")
+x = list(All = rownames(data1_all), Unique = rownames(data1_unique))
+ggvenn(x)
+
+data2_all <- readRDS("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data2_all_samples.rds")
+data2_unique <- readRDS("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/data2_unique_samples.rds")
+x = list(All = rownames(data2_all), Unique = rownames(data2_unique))
+ggvenn(x)
+
+# membership is largely the same, regardless of whether models were trained with all or some samples
+# 5 samples are moved from cluster 1 to cluster 2 when using only unique samples for topic modeling
+```
+
+
+# Set clusters
+```{r, eval = F}
+
+df_phen$cluster <- rep(NA, nrow(df_phen)) 
+df_phen$cluster[rownames(df_phen) %in% rownames(data1)]= "cluster1"
+df_phen$cluster[rownames(df_phen) %in% rownames(data2)]= "cluster2"
+#df_phen$cluster[rownames(df_phen) %in% rownames(data3)]= "cluster3"
+df_phen$cluster <- as.factor(df_phen$cluster)
+df_phen <- df_phen[!is.na(df_phen$cluster), ]
+```
+
 
 # PCoA of samples in topic space, colored by group
 ```{r}
@@ -784,14 +1288,21 @@ plot_ordination(ps_tmp, ord, type = "samples", color = "group") + theme_bw() + g
 
 
 
-
-
 # Check family membership
 ```{r}
 family1 <- ps_mtg@sam_data[rownames(data1), "familyID"]
 family2 <- ps_mtg@sam_data[rownames(data2), "familyID"]
 cross <- intersect(unlist(family1), unlist(family2))
 length(cross) / length(unique(ps_mtg@sam_data$familyID))
+```
+
+# Check ASD membership
+```{r}
+# In cluster 1
+table(df_phen$phenotype[df_phen$group == 1])
+
+# In cluster 2
+table(df_phen$phenotype[df_phen$group == 2])
 ```
 
 # Supplementary File cross omic topics
@@ -812,8 +1323,8 @@ ggsave(filename = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-
 ```
 
 # Differences in metadata
-```{r}
-control_variables <- c("whole_grain", "olive_oil", "fat_oil_freq",  "dairy", "dairy_freq", "fruit", "fruit_freq", "vegetable", "vegetable_freq", "fermented_vegetables", "meal_home_prep", "meal_ready_eat",  "restaurant", "meat", "seafood",  "sweetened_drink",  "sugary_food", "starchy_food",    "csection", "age")
+```{r, fig.width = 10, fig.height = 12}
+control_variables <- c("whole_grain", "olive_oil", "fat_oil_freq",  "dairy", "dairy_freq", "fruit", "fruit_freq", "vegetable", "vegetable_freq", "fermented_vegetables", "meal_home_prep", "meal_ready_eat",  "restaurant", "meat", "seafood",  "sweetened_drink",  "sugary_food", "starchy_food", "age")
 
 plotMetadata <- function(data, control_variables, title){
   meta <- as.data.frame(ps_mtg@sam_data[rownames(data), control_variables])
@@ -840,23 +1351,124 @@ plotMetadata <- function(data, control_variables, title){
 
 
 }
-p <- plotMetadata(data1, control_variables, title = "Within cluster 1")
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_cluster1.pdf"), p, width = 8, height = 6)
+p1 <- plotMetadata(data1, control_variables, title = "Within cluster 1")
+p1
+ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_cluster1.pdf"), p, width = 10, height = 6)
 
-p <- plotMetadata(data2, control_variables, title = "Within cluster 2")
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_cluster2.pdf"), p, width = 8, height = 6)
+p2 <- plotMetadata(data2, control_variables, title = "Within cluster 2")
+p2
+ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_cluster2.pdf"), p, width = 10, height = 6)
+
+p <- ggarrange(p1, p2, ncol = 1)
+p
+ggsave("../../results/metadata_ASD_TD_clusters.pdf",p,  width = 10, height = 12)
 
 df_meta <- data.frame(ps_mtg@sam_data)
 df_meta$phenotype <- ifelse(df_meta$phenotype == "A", 1, 0)
 p <- plotMetadata(df_meta, control_variables, title = "All")
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_none.pdf"), p, width = 8, height = 6)
+p
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "metadata_diff_none.pdf"), p, width = 8, height = 6)
 
+# pcoa plot by metadata, colored by group
+ps_mtg_use@sam_data$csection <- ifelse(ps_mtg_use@sam_data$csection == "True", 1, 0)
+df_tmp <- data.frame(ps_mtg_use@sam_data[ , control_variables])
+df_tmp <- apply(df_tmp, 2, function(x){
+  return((x - mean(x, na.rm = T)) / var(x, na.rm = T))
+})
+
+d <- dist(df_tmp, method= "manhattan")
+library(ape)
+ord <- pcoa(d)
+ps_mtg_use@sam_data$group = df_phen$group
+plot_ordination(ps_mtg_use, ord, type = "samples", color = "group")
+
+df_annotate <- data.frame(df_phen$group)
+rownames(df_annotate) <- rownames(df_tmp)
+pheatmap(df_tmp, annotation_row = df_annotate)
 
 ```
 
+# Clusters share dietary patterns
+```{r, fig.width = 10, fig.height = 5}
+df_meta <- data.frame(ps_mtg@sam_data)
+df_meta$phenotype <- ifelse(df_meta$phenotype == "A", 1, 0)
+
+df_meta <- df_meta[ , control_variables]
+df_meta <- apply(df_meta, 2, function(x){
+  x[is.na(x)] <- median(x, na.rm = T)
+  return(x)
+})
+
+df_meta_norm <- apply(df_meta, 2, function(x) return((x - mean(x, na.rm = T)) / var(x, na.rm = T)))
+cosine_dist <- 1 - cosine(t(df_meta_norm))^2
+
+cluster <- data.frame('cluster' = rep(1, nrow(df_meta_norm)))
+rownames(cluster) <- rownames(df_meta_norm)
+cluster$cluster[rownames(cluster) %in% rownames(data1)] <- "1"
+cluster$cluster[rownames(cluster) %in% rownames(data2)] <- "2"
+
+colors <- c("red", "green")
+names(colors) <- c("1", "2")
+ann_colors <- list(colors = colors)
+pheatmap(df_meta_norm, annotation_row = cluster)
+
+
+cosine_sim[rownames(data1), rownames(data1)]
+
+
+
+# within vs between distances
+
+
+nullRatios <- unlist(lapply(seq(1,10000), function(x){
+  data1_names_null <- sample(sample_names(ps_mtg), nrow(data2))
+  data2_names_null <- setdiff(sample_names(ps_mtg), data1_names_null)
+  within1 <- cosine_dist[data1_names_null, data1_names_null]
+  between1 <- cosine_dist[data1_names_null, data2_names_null]
+  return(mean(within1) / mean(between1))
+}))
+
+within1 <- cosine_dist[rownames(data2), rownames(data2)]
+between1 <- cosine_dist[rownames(data2), rownames(data1)]
+stat =  mean(within1) / mean(between1)
+pval <- sum(nullRatios < stat) / length(nullRatios)
+
+p2 <- ggplot(data.frame(nullRatios), aes(y = nullRatios))+
+  geom_histogram(fill = "lightblue", color = "black")+
+  coord_flip()+
+  theme_bw()+
+  geom_hline(yintercept = stat, lwd = 3, color = "darkred")+
+  ggplot2::annotate("text", x = 1000, y = .957, label = paste0("p = ",pval))+
+  ggtitle("Lifestyle/diet similarity within/btw. clusters:\nCluster 2")+
+  theme(axis.title.y = element_blank())
+p2
+
+within1 <- cosine_dist[rownames(data1), rownames(data1)]
+between1 <- cosine_dist[rownames(data1), rownames(data2)]
+stat =  mean(within1) / mean(between1)
+stat
+pval <- sum(nullRatios < stat) / length(nullRatios)
+p1 <- ggplot(data.frame(nullRatios), aes(y = nullRatios))+
+  geom_histogram(fill = "lightblue", color = "black")+
+  coord_flip()+
+  theme_bw()+
+  geom_hline(yintercept = stat, lwd = 3, color = "darkred")+
+  ggplot2::annotate("text", x = 1000, y = .957, label = paste0("p = ",pval))+
+  ggtitle("Lifestyle/diet similarity within/btw. clusters:\nCluster 1")+
+  theme(axis.title.y = element_blank())
+p1
+
+p <- ggarrange(p1, p2, labels = c("A", "B"))
+ggsave("../../results/metadata_within_cluster_similarity.jpeg", width = 9, height = 4)
+ggsave("../../results/metadata_within_cluster_similarity.pdf", width = 9, height = 4)
+
+```
+
+
+
 # Behavior differences in cluster 1 vs. cluster 2
 ```{r, fig.height = 6, fig.width = 8}
-meta <- read.csv("~/Lab/M3/data/all_meta_data.csv", row.names=1)
+meta <- read.csv("~/Lab/M3/data/all_meta_data.csv")
 
 behavior_vars <- c("Language.ability.and.use..Biospecimen.",	"Conversation.ability..Biospecimen.",	"Understands.speech..Biospecimen.",	"Plays.imaginatively.when.alone..Biospecimen.",
                    "Plays.imaginatively.with.others..Biospecimen.",	"Plays.in.a.group.with.others..Biospecimen.",	"Eye.contact.finding..Biospecimen.",
@@ -927,7 +1539,24 @@ behavior_2 <- behavior_1[complete.cases(behavior_2), ]
 
 
 
+# any behaviors sig. different between groups?
+phenotypes_numeric <- as.data.frame(phenotypes_numeric)
+phenotypes_numeric$cluster <- factor(cluster_id$cluster_id)
+
+df_m <- melt(phenotypes_numeric, id.vars = c("cluster"))
+ggplot(df_m, aes(x = cluster, y = value, fill = cluster))+
+  geom_boxplot()+
+  geom_jitter(width = 0.1)+
+  facet_wrap(~variable)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 1))+
+  theme_bw()
+# no behavior is more prevalent in cluster 1 vs. cluster 2
+```
+
 # Correlations between any topics and behavior
+```{r}
+library(ggpmisc)
 df <- data.frame(rbind(data1, data2))
 df <- data.frame(cbind(df[rownames(phenotypes_numeric), ], phenotypes_numeric))
 df_m <- melt(df, id.vars = colnames(phenotypes_numeric))
@@ -1009,8 +1638,8 @@ p <- pheatmap(-cor_coef, display_numbers = df_annotate,
               color = diverging_hcl(200, palette = "PurpleGreen",rev = T),
               alpha = 0.8, legend = T)
 p
-ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.pdf",p, width = 5, height = 5)
-ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.png",p, width = 5, height = 5)
+#ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.pdf",p, width = 5, height = 5)
+#ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplementary_file_topic_behavior_correlations.png",p, width = 5, height = 5)
 ```
 
 
@@ -1049,16 +1678,7 @@ ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/supplemen
 #data3 <- df_phen[clustering == 3, ]
 ```
 
-# Set clusters
-```{r}
 
-df_phen$cluster <- rep(NA, nrow(df_phen)) 
-df_phen$cluster[rownames(df_phen) %in% rownames(data1)]= "cluster1"
-df_phen$cluster[rownames(df_phen) %in% rownames(data2)]= "cluster2"
-#df_phen$cluster[rownames(df_phen) %in% rownames(data3)]= "cluster3"
-df_phen$cluster <- as.factor(df_phen$cluster)
-df_phen <- df_phen[!is.na(df_phen$cluster), ]
-```
 
 
 
@@ -1103,14 +1723,15 @@ p <- ggplot(df_plot_melt, aes(x = variable, y = value, fill = cluster)) +
   scale_fill_manual(values = c(col1, col2, col3), name = "")+
   ggtitle("To Cluster")+
   scale_y_continuous(expand = expansion(mult = c(0, 0.2)))
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "cluster_topic_diffs.pdf"), p, width = 8, height = 2.5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "cluster_topic_diffs.pdf"), p, width = 8, height = 2.5)
 p_cluster_diff <- p
+p_cluster_diff
 ```
 
 
 # Topic differences within groups
 ```{r}
-ps_topics <- phyloseq(otu_table(t(df), taxa_are_rows = T), sample_data(ps_mtg@sam_data))
+ps_topics <- phyloseq(otu_table(t(df), taxa_are_rows = T), sample_data(ps_mtg_use@sam_data))
 iter <- 50
 res1_topics <- getImportantFactors(ps_topics, data1, iter = iter)
 table(res1_topics$imp)
@@ -1140,16 +1761,16 @@ p2_topics
 
 ```
 
-
+# Functions
 ```{r}
-pvalue_filter <- function(df_plot){
+pvalue_filter <- function(df_plot, pval = 0.05){
   pvals <- apply(df_plot %>% select(-c("phenotype")), 2, function(x){
     aut <- df_plot$phenotype == "A"
     nt <- df_plot$phenotype == "N"
     return(wilcox.test(x[aut], x[nt])$p.value)
   } )
   #pvals <- p.adjust(pvals, method = "fdr")
-  keep <- colnames(df_plot %>% select(-c("phenotype")))[pvals<.05]
+  keep <- colnames(df_plot %>% select(-c("phenotype")))[pvals< pval]
   keep <- c(keep, "phenotype")
   return(list(df_plot = df_plot[, keep], pvals = pvals))
 }
@@ -1169,9 +1790,511 @@ doThePlot <- function(df_plot, title, ncol = 4){
 
 ```
 
+# MBX differences total
+```{r, fig.height = 10, fig.width = 10}
+library(caret)
+iter = 50
+library(randomForest)
+
+# Go through k fold cross-validation
+
+data <- data.frame(rbind(data1, data2))
+train_folds <- createFolds(data$phenotype, k = 14, returnTrain = T)
+
+
+runCrossValidation <- function(train_folds, data, ps, iter= 3, keep_perc = "50%", mtry = 3){
+    tmp_list  <- lapply(train_folds, function(train_fold){
+      train = train_fold
+      print(train)
+      
+      res_mbx <- getImportantFactors(ps, data[train, ], iter = iter)
+      thresh <- quantile(table(res_mbx$imp), probs = seq(0, 1, 0.01))[keep_perc]
+      print(sort(table(res_mbx$imp), decreasing = T))[1:10]
+      print(thresh)
+      df_plot <- keepMostImp(res_mbx$df_plot, res_mbx$imp, thresh)
+      keep <- colnames(df_plot)
+
+      # Tiny model
+      # There are 2 purposes for this model, which only uses features selected on the training set
+      #1. Show the direction of influence of the feature 
+      #2. Evaluate how well those features can predict on a validation set
+      df_train <- keepMostImp(res_mbx$df_plot, res_mbx$imp, thresh)
+      df_train$phenotype <- factor(df_train$phenotype, levels = c("A", "N"))
+      #df_train$phenotype <- ifelse(df_train$phenotype == "A", 1, 0) # turn to binary so we're clear about direction
+      #model <- glm(phenotype ~ ., family = "binomial", data = df_train)
+      model <- randomForest(phenotype ~ ., data = df_train, mtry = mtry)
+      #df_train$phenotype <- ifelse(df_train$phenotype == 1, "A", "N")# turn back to category for interpretation
+      
+      df_test <- data.frame(t(ps_mbx_use@otu_table))
+      df_test$phenotype <- ps_mbx_use@sam_data$phenotype
+      df_test$phenotype <- factor(df_test$phenotype, levels = c("A", "N"))
+      
+      test <- seq(1, nrow(df_plot))
+      test <- test[! test %in% train]
+      df_test <- df_test[test, keep] # get test set with only the selected features
+      # test predictions
+      #preds <- predict.glm(model, newdata = df_test)
+      preds <- predict(model, df_test)
+      #preds <- ifelse(preds > 0, "A", "N")
+      print(preds)
+      print(as.factor(df_plot$phenotype))
+      c_test <- confusionMatrix(data = factor(preds, levels = c("A", "N")), reference = factor(df_test$phenotype, levels = c("A", "N")))
+      print(c_test)
+      
+      #train predictions
+      #preds_train <- predict.glm(model, newdata = df_train)
+      preds_train <- predict(model, df_train)
+      #preds_train <- ifelse(preds_train > 0, "A", "N")
+      c_train <- confusionMatrix(data = factor(preds_train, levels = c("A", "N")), reference = factor(df_train$phenotype, levels = c("A", "N")))
+      
+      return(list(model = model, c_test = c_test, c_train = c_train))
+    })
+    
+    model_list <- lapply(tmp_list, function(x){
+      return(x$model)
+    })
+    c_test_list <- lapply(tmp_list, function(x){
+      return(x$c_test)
+    })
+    
+    c_train_list <- lapply(tmp_list, function(x){
+      return(x$c_train)
+    })
+  return(list(model_list = model_list, c_test_list = c_test_list, c_train_list = c_train_list))
+}
+
+# normalize each metabolite to interpret relative importance
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+seqtab <- data.frame(ps_mbx_use@otu_table)
+tmp <- apply(seqtab, 1, function(x){
+  return((x - mean(x)) / sd(x))
+})
+ps_mbx_use@otu_table <- otu_table(t(tmp), taxa_are_rows = T)
+
+tmp <- runCrossValidation(train_folds, data, ps_mbx_use, iter = 100, keep_perc = "75%")
+model_list <- tmp$model_list
+saveRDS(model_list, "../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_model_list.rds")
+c_test_list <- tmp$c_test_list
+saveRDS(c_test_list, "../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_test_list.rds")
+c_train_list <- tmp$c_train_list
+saveRDS(c_train_list, "../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_train_list.rds")
+
+
+c_test_list <- readRDS("../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_test_list.rds")
+c_train_list<- readRDS("../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_train_list.rds")
+model_list <- readRDS("../../results/latent_variable_modeling/ml_models_metabolites_crossval/rf_model_list.rds")
+accuracies_test <- sapply(c_test_list, function(x){
+  return(as.numeric(x$overall[[1]]))
+})
+print(accuracies_test)
+print(mean(accuracies_test))
+
+accuracies_train <- sapply(c_train_list, function(x){
+  return(x$overall[[1]])
+})
+print(accuracies_train)
+print(mean(accuracies_train))
+
+# Interpretation of coefficients
+#coefficients_list <- lapply(model_list, function(x){
+#  return(summary(x)$coef)
+#})
+#estimates <- sapply(coefficients_list, function(x){
+#  return(x[, "Estimate"])
+#})
+
+coefficients_list <- lapply(model_list, function(x){
+  return(varImp(x))
+})
+
+#estimates <- unlist(estimates)
+#names(estimates) <- gsub("Fold..\\.", "", names(estimates))
+#estimates
+#df <- data.frame(estimates)
+#df$names <- names(estimates)
+#df <- df[df$names != "(Intercept)", ]
+df <- do.call(rbind, coefficients_list)
+df$names <- gsub("Fold..\\.", "", rownames(df))
+
+#res <- df %>% group_by(names) %>% summarise(median = median(estimates), n = n(), estimates_str= toString(estimates), convergence = sum(sapply(as.numeric(estimates), sign), na.rm = T))
+res <- df %>% group_by(names) %>% summarise(median = median(Overall), n= n())
+res <- res[res$n > 3, ]
+res[order(res$n, decreasing = T),][1:10,]
+res[order(res$convergence, decreasing = F),][1:10, ]
+res
+# negative means N, positive means A
+```
+
+
+
+# Visualize the differential abundance of those selected features
+```{r, fig.width = 10}
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+#res$convergence_ratio <- abs(res$convergence) / res$n
+#features <- unique(res$names[res$convergence_ratio > 0.5])
+features <- unique(res$names[res$n > 7])
+features <- features[features != "(Intercept)"]
+
+# we're going to do this manually, because the names are annoyingly changed
+doNameConversion <- function(tn){
+  tn <- gsub(" ", ".", tn)
+  tn <- gsub("-", ".", tn)
+  tn <- gsub("\\(", ".", tn)
+  tn <- gsub("\\)", ".", tn)
+  tn <- gsub(":", ".", tn)
+  tn <- gsub("\\/", ".", tn)
+  tn <- gsub("^([0-9])(.*)$", "X\\1\\2" , tn)
+  tn <- gsub("\\*", ".", tn)
+  tn <- gsub("2,8", "2.8", tn)
+  return(tn)
+}
+tn <- doNameConversion(taxa_names(ps_mbx_use))
+features[!features %in% tn]
+tn[grep("quinolinediol", tn)]
+taxa_names(ps_mbx_use) <- tn
+
+df_plot <- ps_mbx_use@otu_table[features, ]
+df_plot <- data.frame(t(df_plot))
+df_plot$phenotype <- ps_mbx_use@sam_data$phenotype
+df_plot <- pvalue_filter(df_plot)$df_plot
+
+df_plot <- melt(df_plot)
+#colnames(df_plot) <- c("variable", "phenotype", "value")
+#df_plot$phenotype <- ifelse(grepl("A" , df_plot$phenotype), "A", "N")
+
+#df_plot <- df_plot[df_plot$value > 0, ]
+
+ggplot(df_plot, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + geom_jitter(width = 0.2)+
+  facet_wrap(~variable)+
+  stat_compare_means(method = "wilcox.test")+
+  scale_y_continuous(expand = c(0, 20))+
+  theme_bw()
+```
+# Now, how are topics related to these compounds? are they all part of the same topic? Probably not. When we subtype the population using topics, are these still predictive? In one population but not the other?
+
+# Are these compounds related to the microbiome 16s or genes? Can we make a network?
+
+# visualize those features in the two groups
+```{r, fig.width = 6, fig.height = 2}
+#features <- unique(as.character(df_plot$variable))
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+#features <- c("5-dodecenoate (12:1n7)", "caprate (10:0)")
+features <- c("5-dodecenoate (12:1n7)")
+
+ps_mbx_use@sam_data$phenotype = ifelse(ps_mbx_use@sam_data$phenotype == "A", "Autism", "Typically developing")
+ps_mbx_use@sam_data$phenotype <- factor(ps_mbx_use@sam_data$phenotype, levels = c("Typically developing", "Autism"))
+
+df_plot1 <- ps_mbx_use@otu_table[features, rownames(data1)]
+df_plot1 <- melt(df_plot1)
+colnames(df_plot1) <- c("variable", "sample", "value")
+df_plot1$sample <- as.character(df_plot1$sample)
+df_plot1$phenotype <- ps_mbx_use@sam_data[df_plot1$sample, ]$phenotype
+
+df_plot1 <- df_plot1[df_plot1$value > 0, ]
+ggplot(df_plot1, aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() + geom_jitter(width = 0.2)+
+  facet_wrap(~variable, scales = "free", ncol = 2, nrow = 3)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 4))+
+  theme_bw()+
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank())+
+  #scale_color_manual(values = c(td_color, asd_color))+
+  scale_fill_manual(values= c(td_color, asd_color))
+
+df_plot1 %>% group_by("phenotype") %>% summarise(mean = mean(value))
+df_plot2 %>% group_by("phenotype") %>% summarise(mean = mean(value))
+
+
+df_plot2 <- ps_mbx_use@otu_table[features, rownames(data2)]
+df_plot2 <- melt(df_plot2)
+colnames(df_plot2) <- c("variable", "sample", "value")
+df_plot2$sample <- as.character(df_plot2$sample)
+df_plot2$phenotype <- ps_mbx_use@sam_data[df_plot2$sample, ]$phenotype
+
+df_plot2 <- df_plot2[df_plot2$value > 0, ]
+ggplot(df_plot2, aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot() + geom_jitter(width = 0.2)+
+  facet_wrap(~variable, scales = "free", ncol = 2, nrow = 3)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 20))+
+  theme_bw()+
+    theme(axis.text.x = element_blank(), axis.title.x = element_blank())+
+  #scale_color_manual(values = c(td_color, asd_color))+
+  scale_fill_manual(values= c(td_color, asd_color))
+
+
+
+df_plot <- data.frame(t(ps_mbx_use@otu_table[features, ]))
+df_plot$phenotype <- ps_mbx_use@sam_data$phenotype
+#df_plot$phenotype = ifelse(df_plot$phenotype == "A", "Autism", "Typically developing")
+#df_plot$phenotype <- factor(df_plot$phenotype, levels = c("Typically developing", "Autism"))
+
+
+df_plot$group <- ifelse(rownames(df_plot) %in% rownames(data1), "Cluster1", "Cluster2")
+df_plot <- melt(df_plot)
+df_plot$value <- df_plot$value/ median(df_plot$value[df_plot$phenotype == "Typically developing"])
+
+df_plot <- df_plot[df_plot$value > 0, ]
+ggplot(df_plot, aes(x = phenotype, y = value, fill = phenotype)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(width = 0.2)+
+  facet_grid(variable~group)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 20))+
+  theme_bw()+
+    theme(axis.text.x = element_blank(), axis.title.x = element_blank())+
+  #scale_color_manual(values = c(td_color, asd_color))+
+  scale_fill_manual(values= c(td_color, asd_color))+
+  scale_y_log10(expand = c(0, 0.02))
+```
+
+# Features do not have particularly high weight in any topic
+```{r}
+# Use topics as a way of understanding the metabolite-centered phenomenon. WHY is oxalate high in A and CEGABA high in N? The topics are supposed to summarize the explanatory power of the ecosystem
+library(lsa)
+
+features
+
+colnames(betas_mbx) <- doNameConversion(colnames(betas_mbx))
+betas_mbx[, features]
+
+
+for(f in features){
+  print(f)
+  for(topic in seq(1, 4)){
+    metabolite <- betas_mbx[, f][topic]
+    hist(betas_mbx[topic,], breaks = 20)
+    abline(v = metabolite)
+    pval <- sum(betas_mbx[topic, ] > metabolite) / ncol(betas_mbx)
+    print(pval)
+  }
+
+}
+
+
+# are features correlated with any topic across samples
+# If we used cosine distance, we'd have to create a null distribution of cosine distance using all the metabolites compared to that topic, and that's annoying, and basically the same as a spearman's, because it defaults to relative rank
+getTopicCorrelations <- function(metabolite_vec, thetas){
+  pvals <- apply(thetas, 2, function(topic_vec){
+    cor.test(as.numeric(metabolite_vec), as.numeric(topic_vec[names(metabolite_vec)]), method = "spearman")$p.value
+  })
+  print(pvals[pvals < .1])
+  return(pvals[pvals < .1])
+}
+
+for(feature in features){
+  print(feature)
+  metabolite_vec <- data.frame(ps_mbx_use@otu_table[feature, ])
+  getTopicCorrelations(metabolite_vec,  thetas_mbx[names(metabolite_vec), ])
+  getTopicCorrelations(metabolite_vec, thetas_mtg[names(metabolite_vec), ])
+  getTopicCorrelations(metabolite_vec, thetas_mtt[names(metabolite_vec), ])
+  getTopicCorrelations(metabolite_vec, thetas_16s[names(metabolite_vec), ])
+}
+
+
+```
+
+
+
+# ML cross validation A/N w/ topics
+```{r}
+library(randomForest)
+ps <- phyloseq(otu_table(data, taxa_are_rows = F), sample_data(ps_mbx_use@sam_data))
+train_folds <- createFolds(data$phenotype, k = 7, returnTrain = T)
+
+tmp_list  <- lapply(train_folds, function(train_fold){
+      train = train_fold
+      x <- data.frame(ps@otu_table[train, ])
+      x$phenotype <- as.factor(ps@sam_data$phenotype[train])
+      rf <- randomForest(phenotype ~ ., data = x)
+      
+      x_new <- data.frame(ps@otu_table[-train, ])
+      x_new$phenotype <- ps@sam_data$phenotype[-train]
+      accuracy <- sum(predict(rf, x_new) == x_new$phenotype) / nrow(x_new)
+      return(accuracy)
+    })
+tmp_list
+
+# predicting using the topics is very bad, but predicting with the metabolites is actually quite good!
+
+
+```
+
+
+# can we do the below process with cross validation?
+```{r, fig.width = 12}
+# Split samples into 2 clusters
+# From each cluster, select a training set (80%)
+# Select features from that training set, and train a glm model
+# Validate this tiny model on the training set from each cluster
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+seqtab <- data.frame(ps_mbx_use@otu_table)
+tmp <- apply(seqtab, 1, function(x){
+  return((x - mean(x)) / sd(x))
+})
+ps_mbx_use@otu_table <- otu_table(t(tmp), taxa_are_rows = T)
+
+train_folds <- createFolds(data1$phenotype, k = 10, returnTrain = T)
+
+tmp1 <- runCrossValidation(train_folds, data1, ps_mbx_use, iter = 50, keep = "50%", mtry = 3)
+model_list <- tmp1$model_list
+c_test_list <- tmp1$c_test_list
+c_train_list <- tmp1$c_train_list
+
+accuracies_test <- sapply(c_test_list, function(x){
+  return(as.numeric(x$overall[[1]]))
+})
+print(accuracies_test)
+print(median(accuracies_test))
+
+accuracies_train <- sapply(c_train_list, function(x){
+  return(x$overall[[1]])
+})
+print(accuracies_train)
+print(median(accuracies_train))
+
+coefficients_list <- lapply(model_list, function(x){
+  return(varImp(x))
+})
+df <- do.call(rbind, coefficients_list)
+df$names <- gsub("Fold..\\.", "", rownames(df))
+
+#res <- df %>% group_by(names) %>% summarise(median = median(estimates), n = n(), estimates_str= toString(estimates), convergence = sum(sapply(as.numeric(estimates), sign), na.rm = T))
+res1 <- df %>% group_by(names) %>% summarise(median = median(Overall), n= n())
+res1
+#res1 <- res1[res1$n > 2, ]
+res1[order(res1$n, decreasing = T),][1:10,]
+#res[order(res$convergence, decreasing = F),][1:10, ]
+
+# Interpretation of coefficients
+#coefficients_list <- lapply(model_list, function(x){
+#  return(summary(x)$coef)
+#})
+#estimates <- sapply(coefficients_list, function(x){
+#  return(x[, "Estimate"])
+#})
+
+
+#getBestFeaturesGLM <- function(estimates){
+#  estimates <- unlist(estimates)
+#  names(estimates) <- gsub("Fold.\\.", "", names(estimates))
+#  estimates
+#  df <- data.frame(estimates)
+#  df$names <- names(estimates)
+#  res <- df %>% group_by(names) %>% summarise(median = median(estimates), n = n())
+  
+#  return(res[order(res$n, decreasing = T),])
+#}
+#res1 <- getBestFeaturesGLM(estimates)
+#res1
+
+
+train_folds <- createFolds(data2$phenotype, k = 10, returnTrain = T)
+
+tmp2 <- runCrossValidation(train_folds, data2, ps_mbx_use, iter = 50, keep = "50%", mtry = 3)
+model_list <- tmp2$model_list
+c_test_list <- tmp2$c_test_list
+c_train_list <- tmp2$c_train_list
+
+accuracies_test <- sapply(c_test_list, function(x){
+  return(as.numeric(x$overall[[1]]))
+})
+print(accuracies_test)
+print(median(accuracies_test))
+
+accuracies_train <- sapply(c_train_list, function(x){
+  return(x$overall[[1]])
+})
+print(accuracies_train)
+print(median(accuracies_train))
+
+coefficients_list <- lapply(model_list, function(x){
+  return(varImp(x))
+})
+df <- do.call(rbind, coefficients_list)
+df$names <- gsub("Fold..\\.", "", rownames(df))
+
+#res <- df %>% group_by(names) %>% summarise(median = median(estimates), n = n(), estimates_str= toString(estimates), convergence = sum(sapply(as.numeric(estimates), sign), na.rm = T))
+res2 <- df %>% group_by(names) %>% summarise(median = median(Overall), n= n())
+#res2 <- res2[res2$n > 2, ]
+res2[order(res2$n, decreasing = T),][1:10,]
+#res[order(res$convergence, decreasing = F),][1:10, ]
+res2
+
+###########################
+#####################
+ps_mbx_use <- prune_samples(samples, ps_mbx_filt)
+features <- res1$names[res1$n > 5]
+features <- features[features != "(Intercept)"]
+features
+
+ps_mbx_1 <- prune_samples(rownames(data1), ps_mbx_use)
+tn <- taxa_names(ps_mbx_1)
+tn <- gsub(" ", ".", tn)
+tn <- gsub("-", ".", tn)
+tn <- gsub("\\(", ".", tn)
+tn <- gsub("\\)", ".", tn)
+tn <- gsub(":", ".", tn)
+tn <- gsub("\\/", ".", tn)
+tn <- gsub("^([0-9])(.*)$", "X\\1\\2" , tn)
+tn <- gsub("\\*", ".", tn)
+tn <- gsub("2,8", "2.8", tn)
+features[!features %in% tn]
+tn[grep("quinolinediol", tn)]
+taxa_names(ps_mbx_1) <- tn
+
+df_plot <- ps_mbx_1@otu_table[features, ]
+
+df_plot <- melt(df_plot)
+colnames(df_plot) <- c("variable", "phenotype", "value")
+df_plot$phenotype <- ifelse(grepl("A" , df_plot$phenotype), "A", "N")
+
+df_plot <- df_plot[df_plot$value > 0, ]
+ggplot(df_plot, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + geom_jitter(width = 0.2)+
+  facet_wrap(~variable)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 20))+
+  theme_bw()
+
+################################
+
+
+features <- res2$names[res2$n > 5]
+features <- features[features != "(Intercept)"]
+features
+
+ps_mbx_2 <- prune_samples(rownames(data2), ps_mbx_use)
+tn <- taxa_names(ps_mbx_2)
+tn <- gsub(" ", ".", tn)
+tn <- gsub("-", ".", tn)
+tn <- gsub("\\(", ".", tn)
+tn <- gsub("\\)", ".", tn)
+tn <- gsub(":", ".", tn)
+tn <- gsub("\\/", ".", tn)
+tn <- gsub("^([0-9])(.*)$", "X\\1\\2" , tn)
+tn <- gsub("\\*", ".", tn)
+tn <- gsub("2,8", "2.8", tn)
+tn <- gsub("chain,", "chain.", tn)
+tn <- gsub(",", ".", tn)
+tn <- gsub("\\+", ".", tn)
+tn <- gsub("\\.N\\.1", "X.N.1", tn)
+features[!features %in% tn]
+tn[grep("spermidine", tn)]
+taxa_names(ps_mbx_2) <- tn
+
+df_plot <- ps_mbx_2@otu_table[features, ]
+
+df_plot <- melt(df_plot)
+colnames(df_plot) <- c("variable", "phenotype", "value")
+df_plot$phenotype <- ifelse(grepl("A" , df_plot$phenotype), "A", "N")
+
+df_plot <- df_plot[df_plot$value > 0, ]
+ggplot(df_plot, aes(x = phenotype, y = value, color = phenotype)) + geom_boxplot() + geom_jitter(width = 0.2)+
+  facet_wrap(~variable)+
+  stat_compare_means()+
+  scale_y_continuous(expand = c(0, 20))+
+  theme_bw()
+```
+
 
 # MBX difference between groups
-```{r, fig.width = 7.5, fig.height = 4}
+```{r, fig.width = 10, fig.height = 4}
 iter <- 100
 thresh <- 10
 
@@ -1179,52 +2302,92 @@ thresh <- 10
 
 # summed, leaving big mtt topic in
 ################### Group 1  ####################################################################
-#res1_mbx <- getImportantFactors(ps_mbx, data1, iter = iter)
+#res1_mbx <- getImportantFactors(ps_mbx_use, data1, iter = iter)
 #saveRDS(res1_mbx, paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mbx_group1.rds"))
 res1_mbx <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mbx_group1.rds"))
-table(res1_mbx$imp)
+sort(table(res1_mbx$imp))
 hist(table(res1_mbx$imp), breaks = 50)
-thresh <- quantile(table(res1_mbx$imp), probs = seq(0, 1, 0.01))["90%"]
-#thresh <- 15
+thresh <- quantile(table(res1_mbx$imp), probs = seq(0, 1, 0.01))["89%"]
+thresh <- 20
 df_plot <- keepMostImp(res1_mbx$df_plot, res1_mbx$imp, thresh)
-tmp <- pvalue_filter(df_plot)
+tmp <- pvalue_filter(df_plot, .05)
 df_plot <- tmp$df_plot
 pvals<- tmp$pvals
 
 df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
+df_plot1 <- df_plot
 p1_mbx <- doThePlot(df_plot, title = "Within cluster 1", ncol = 3)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.pdf"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.png"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.pdf"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster1_diff.png"), p1_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
 p1_mbx
 
 ################### Group 2  ####################################################################
-#res2_mbx <- getImportantFactors(ps_mbx, data2, iter = iter)
+#res2_mbx <- getImportantFactors(ps_mbx_use, data2, iter = iter)
 #saveRDS(res2_mbx, paste0("../../results/latent_variable_modeling/", folder, "phenotype_diff_res_mbx_group2.rds"))
 res2_mbx <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mbx_group2.rds"))
-table(res2_mbx$imp)
+sort(table(res2_mbx$imp))
+hist(table(res2_mbx$imp), breaks = 50)
 thresh <- quantile(table(res2_mbx$imp), probs = seq(0, 1, 0.01))["90%"]
+#thresh <- 20
+print(thresh)
 df_plot <- keepMostImp(res2_mbx$df_plot, res2_mbx$imp, thresh)
 tmp <- pvalue_filter(df_plot)
 df_plot <- tmp$df_plot
 pvals<- tmp$pvals
 df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
+df_plot2 <- df_plot
 p2_mbx <- doThePlot(df_plot, title = "Within cluster 2", ncol = 3)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.pdf"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*3 + .5)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.png"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.pdf"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*3 + .5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "/mbx_cluster2_diff.png"), p2_mbx, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5, dpi = 3000)
 p2_mbx
 
 
 #traditional testing without filtering
-#counts <- ps_mbx@otu_table[,rownames(data1)]
-#phenotype <- ps_mbx@sam_data$phenotype
+counts <- ps_mbx@otu_table[,rownames(data1)]
+phenotype <- ps_mbx@sam_data$phenotype
 
 tests <- apply(counts, 1, function(x){
   return(t.test(as.numeric(x[phenotype == "A"]), as.numeric(x[phenotype == "N"])))
 })
 pvals <- unlist(lapply(tests, function(x) return(x$p.value)))
-pvals[pvals<.05]
+pvals[pvals < .05]
 pvals_adj <- p.adjust(pvals)
 pvals_adj[pvals_adj < .05]
+
+# CMPF is a strong inhibitor of mitochondrial respiration and if the mitochondria aren't working in this ASD form, then they need all the MCFA as a replacement
+```
+
+# Features in the whole cohort
+```{r, fig.width = 8, fig.height = 8}
+ps_mbx_use <- ps_mbx_filt
+features <- colnames(df_plot1)
+features <- features[features!= "phenotype"]
+
+taxa_names(ps_mbx_use)  <- doNameConversion(taxa_names(ps_mbx_use) )
+
+df_plot <- data.frame(t(ps_mbx_use@otu_table[features, ]))
+df_plot$phenotype <- ps_mbx_use@sam_data[rownames(df_plot), ]$phenotype
+df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
+p1 <- doThePlot(df_plot, title = "", ncol = 3) + theme(axis.text.x = element_blank()) + ylab("Normalized abundance") + xlab("")
+p1
+
+
+
+
+features <- colnames(df_plot2)
+features <- features[features!= "phenotype"]
+
+taxa_names(ps_mbx_use)  <- doNameConversion(taxa_names(ps_mbx_use) )
+
+df_plot <- data.frame(t(ps_mbx_use@otu_table[features, ]))
+df_plot$phenotype <- ps_mbx_use@sam_data[rownames(df_plot), ]$phenotype
+df_plot$phenotype <- factor(df_plot$phenotype, levels = c("N", "A"))
+p2 <- doThePlot(df_plot, title = "", ncol = 3) + theme(axis.text.x = element_blank()) + ylab("Normalized abundance") + xlab("")
+p2
+
+p <- ggarrange(p1, p2, ncol = 1)
+p
+ggsave("../../results/diff_abundance_across_cohort.pdf",p,  width = 8, height = 8)
 ```
 
 # Figure3
@@ -1245,8 +2408,8 @@ ggsave(filename = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-
 ```{r}
 iter = 100
 ################### Group 1  ####################################################################
-res1_mtg <- getImportantFactors(ps_mtg, data1, iter = iter)
-saveRDS(res1_mtg, paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group1.rds"))
+res1_mtg <- getImportantFactors(ps_mtg_use, data1, iter = iter)
+#saveRDS(res1_mtg, paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group1.rds"))
 #res1_mtg <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group1.rds"))
 table(res1_mtg$imp)
 thresh <- quantile(table(res1_mtg$imp), probs = seq(0, 1, 0.01))["90%"]
@@ -1262,13 +2425,13 @@ colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
 
 
 p1_mtg <- doThePlot(df_plot, title = "Within cluster 1", ncol = 3)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "mtg_cluster1_diff.pdf"), p1_mtg, width = 2.5 * 3 + 0.5, height= 1.833333*4 + .5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "mtg_cluster1_diff.pdf"), p1_mtg, width = 2.5 * 3 + 0.5, height= 1.833333*4 + .5)
 p1_mtg
 
 
 
 ################### Group 2  ####################################################################
-#res2_mtg <- getImportantFactors(ps_mtg, data2, iter = iter)
+res2_mtg <- getImportantFactors(ps_mtg_use, data2, iter = iter)
 #saveRDS(res2_mtg, paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group2.rds"))
 #res2_mtg <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group2.rds"))
 #thresh <- 15
@@ -1286,7 +2449,7 @@ colnames(df_plot) <- c(paste(new_names , old_names),"phenotype")
 
 
 p2_mtg <- doThePlot(df_plot, title = "Within cluster 2", ncol = 2)
-ggsave(paste0("../../results/latent_variable_modeling/", folder, "mtg_cluster2_diff.pdf"), p2_mtg, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5)
+#ggsave(paste0("../../results/latent_variable_modeling/", folder, "mtg_cluster2_diff.pdf"), p2_mtg, width = 2.5 * 3 + 0.5, height= 1.833333*2 + .5)
 p2_mtg
 
 
@@ -1294,21 +2457,19 @@ p2_mtg
 
 To be fair, we can't drop off a bunch of important genes. So we need to do gsea on all genes that come up
 ```{r}
-# In the end, we don't have large pathway overlap
-folder <- "16s-4_mtg-5_mtt-4_mbx-7"
-res1_mtg <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtg_group1.rds"))
-thresh <- 2
-df_plot <- keepMostImp(res1_mtg$df_plot, res1_mtg$imp, thresh)
-tmp <- pvalue_filter(df_plot)
-df_plot <- tmp$df_plot
-
+# Get gene list
+res <- res2_mtg
+thresh <- quantile(table(res$imp), probs = seq(0, 1, 0.01))["50%"]
+thresh = 1
+df_plot <- keepMostImp(res$df_plot, res$imp, thresh)
+dim(df_plot)
+#tmp <- pvalue_filter(df_plot)
+#df_plot <- tmp$df_plot
 
 #1. Get ranked list of KOs using rank sum test
 stat <- apply(df_plot %>% select(-c("phenotype")), 2, function(x){
   log2(mean(x[df_plot$phenotype == "A"]) / mean(x[df_plot$phenotype == "N"]))
 })
-
-
 
 #get KOs
 kos <- sapply(colnames(df_plot), function(x){
@@ -1324,44 +2485,20 @@ write.table(as.character(kos), file =  "../../results/latent_variable_modeling/k
 
 df_tmp <- df_tmp[order(df_tmp$stat, decreasing = T), ]
 df_tmp <- df_tmp[df_tmp$stat != 0, ]
-write.table(df_tmp, file = paste0("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_kos_rankedlist.csv"), row.names = F, quote = F, sep = "\t")
+write.table(df_tmp, file = paste0("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/mtg_kos_rankedlist_cluster2.csv"), row.names = F, quote = F, sep = "\t")
+
+
 
 # go to python to use pre-ranked list functionality
+#M3/5d/gsea/gsea_prerank.ipynb
 
-res <- read.csv("~/Lab/M3/results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/gsea/gsea_mtg_cluster1.csv")
+
+res <- read.csv("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/gsea/gsea_mtg_cluster2.csv")
 res <- res[!is.na(res$es), ]
-res <- res[res$num_genes > 1 & res$pval < .2, ]
+res <- res[res$num_genes > 1 & res$pval < .5, ]
 res
-library(pathview)
-library(KEGGREST)
-plotPathway <- function(path){
-  gene_list <- names(keggGet(path)[[1]]$ORTHOLOGY)
-  genes <- gene_list
-  #effect_size <- rep(0, length(gene_list))
-  #names(effect_size) <- gene_list
-  
-  #differential abundance mtg
-  deseq_mtg <- readRDS("E:/Users/kitikomp/Documents/Lab/M3//differential_analysis/mtg/deseq_full.rds")[[1]]
-  effect_size_mtg <- deseq_mtg[genes, "log2FoldChange"]
-  names(effect_size_mtg) <- genes
-  #effect_size_mtg[deseq_mtg[genes, "pvalue"] > .05] = 0
-  
-  #differential abundance mtt
-  deseq_mtt <- readRDS("E:/Users/kitikomp/Documents/Lab/M3//differential_analysis/mtt/deseq_full.rds")[[1]]
-  effect_size_mtt <- deseq_mtt[genes, "log2FoldChange"]
-  names(effect_size_mtt) <- genes
-  #effect_size_mtt[deseq_mtt[genes, "pvalue"] > .05] = 0
-  
-  df <- data.frame(cbind(effect_size_mtg, effect_size_mtt))
-  
-  pv <- pathview(gene.data = df, pathway.id = path,
-                 species = "ko",
-                 low = "white", mid = "#F0FFD7", high = td_color,
-                 limit = list("gene" = c(round(min(effect_size_mtg, effect_size_mtt, na.rm = T)), round(max(effect_size_mtg, effect_size_mtt, na.rm = T)))),
-                 res = 1000)
-  head(pv$plot.data.gene)
-}
 
+# plot results
 for(i in seq(1,4)){
   path <- res$Term[i]
   gene_list <- gsub('\\[', '',res$genes_list[i])
@@ -1376,9 +2513,6 @@ for(i in seq(1,4)){
                  low = "white", mid = "#F0FFD7", high = asd_color,
                  limit = list("gene" = range(effect_size_mtg$stat)))
 }
-
-getwd()
-res
 ```
 
 
@@ -1386,9 +2520,9 @@ res
 ```{r}
 thresh <- 15
 ################### Group 1  ####################################################################
-res1_mtt <- getImportantFactors(ps_mtt, data1, iter = iter)
-saveRDS(res1_mtt, paste0("../../results/latent_variable_modeling/", folder, "phenotype_diff_res_mtt_group1.rds"))
-#res1_mtt <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtt_group1.rds"))
+#res1_mtt <- getImportantFactors(ps_mtt, data1, iter = iter)
+#saveRDS(res1_mtt, paste0("../../results/latent_variable_modeling/", folder, "phenotype_diff_res_mtt_group1.rds"))
+res1_mtt <- readRDS(paste0("../../results/latent_variable_modeling/", folder, "/phenotype_diff_res_mtt_group1.rds"))
 table(res1_mtt$imp)
 thresh <- quantile(table(res1_mtt$imp), probs = seq(0, 1, 0.01))["90%"]
 df_plot <- keepMostImp(res1_mtt$df_plot, res1_mtt$imp, thresh)
@@ -1506,7 +2640,7 @@ ggsave(filename = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-
 
 
 
-# Severity of ASD in groups
+# Mara Severity of ASD in groups
 ```{r}
 df_phen$MARA <- ps_mtg@sam_data[rownames(df_phen), ]$MARA
 ggplot(df_phen, aes(x = cluster, y = MARA, fill = cluster)) + geom_boxplot()+
@@ -2299,6 +3433,7 @@ ggplot(data_melt, aes(x = cluster, y = value, color = cluster))+
   scale_y_continuous(expand = c(-0.05, 1))
 
 ```
+
 # Age ASD vs TD within each cluster
 ```{r}
 
@@ -2375,6 +3510,7 @@ df_mtt_cluster2 <- getRankedList(ps_mtt_filt, data2)
 write.csv(df_mtt_cluster2, "../../results/latent_variable_modeling/rank_list_mtt_cluster2.rnk", row.names = F, col.names = F)
 ```
 
+
 # Interpret gsea
 ```{r}
 # Gsea based on a t test between ASD and TD within clusters
@@ -2434,6 +3570,27 @@ tmp
 
 
 
+```
+
+# GSEA between topics for topic interpretation
+```{r}
+#Make each topic a condition, calculate the logfoldchange for every gene between any two topics (or between one topic and the average of the other topics) and then do gsea to define the genetic signature of the topic
+
+# see M3/5d/data/gsea_rna_seq.rmd  for gsea example
+betas <- exp(betas_mtg)
+betas <- betas[!is.na(rowSums(betas)), ]
+print(dim(betas))
+
+
+df <- data.frame(ps_mtg@tax_table)
+df <- df[!duplicated(df$Definition), ]
+rownames(df) <- df$Definition
+
+betas_m <- melt(betas)
+betas_m$definition <- df[betas_m$Var2, "Definition"]
+betas_m$gene <- df[betas_m$definition, "Gene"]
+
+#mapIds(org.Hs.eg.db,  as.character(betas_m$gene), "ENTREZID", "SYMBOL")
 ```
 
 # Silly
@@ -2945,6 +4102,7 @@ library("Hmisc")
 library(pbapply)
 library(ggplotify)
 library(patchwork)
+
 #Generate random numbers with the same constraints and normalize them in the same way, and see if they still cluster the same way. Repeat 1000s of time, distribution over clustering strength
 
 generateThetasNull <- function(nsamples, ntopics){
@@ -3170,4 +4328,215 @@ ggsave(filename = "../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-
 
 
 
+```
+
+# PCoA metabolites colored by phenotype
+```{r, fig.width = 4, fig.height = 2}
+ps_mbx@sam_data$phenotype <- ifelse(ps_mbx@sam_data$phenotype == "A", "Autism", "Typically Developing")
+ord <- ordinate(ps_mbx, method = "PCoA", distance = "euclidean")
+plot_ordination(ps_mbx, ordination = ord, type = "samples", color = "phenotype") + theme_bw() + scale_color_manual(values = c(asd_color, td_color)) + geom_point(size = 2)
+
+ggsave("../../figures/metabolite_pcoa.png", width = 6, height = 2, dpi = 1000)
+```
+
+
+
+
+# 5D predictions from 16s
+```{r, fig.width = 12}
+library(caret)
+library(KEGGREST)
+
+# Read in the data 
+ps_mtg <- readRDS("../../data/mtg/ps_mtg_rle_nooutliers.rds")
+ps_mbx <- readRDS("../../data/mbx/ps_mbx_rle_nooutliers.rds")
+
+# use ml to get variable importance relating genes from mtg to 5D concentration
+predict5D <- function(data){
+  control <- trainControl(method="repeatedcv", number=3, repeats=2)
+  model <- train(y~., data=data, method="rf", preProcess="scale", trControl=control)
+  plot(data$y, predict(model, data))
+  importance <- varImp(model, scale=FALSE)
+  importance <- data.frame(importance[[1]])
+  imp_sort <- importance[order(importance$Overall, decreasing = T), , drop = F]
+  return(imp_sort)
+}
+
+# Predict from MBX
+counts_5d <- ps_mbx@otu_table[grep("dodecenoate", taxa_names(ps_mbx)), ]
+x <- data.frame(ps_mbx@otu_table[!grepl("dodecenoate", taxa_names(ps_mbx)), ])
+data <- data.frame(t(x))
+data$y <- as.numeric(counts_5d)
+predict5D(data)
+
+
+# Predict from MTG
+sample_names <- intersect(sample_names(ps_mtg), sample_names(ps_mbx))
+y <- as.numeric(counts_5d[ , sample_names])
+data <- data.frame(t(ps_mtg@otu_table[ , sample_names]))
+data$y <- y
+imp_mtg <- predict5D(data)
+imp_mtg
+# use this as ranked gene list
+df <- data.frame(kegg_id = rownames(imp_mtg), score = imp_mtg$Overall)
+write.table(df, "../../5d/mtg_rf_5d.csv", row.names = F, quote = F, sep = "\t")
+# do gsea using http://localhost:8888/notebooks/scripts_backup/gsea/gsea_prerank.ipynb
+
+mtg_res <- read.csv("~/Lab/M3/5d/gsea_mtg_predicting_5d.csv")
+getKeggName <- function(name){
+  tryCatch(
+    # try to do this
+    {
+       return(keggGet(name)[[1]]$NAME)
+    },
+    error = function(e){
+      print(e)
+      return(NA)
+    }
+  )
+ 
+}
+
+pathway_names <- lapply(mtg_res$Term, function(x){
+  getKeggName(x)
+})
+
+mtg_res$full_name <- unlist(pathway_names)
+
+```
+
+
+# oaxalate
+```{r, fig.width = 4, fig.height = 4}
+idx = grepl("oxalate", taxa_names(ps_mbx))
+oxalate = ps_mbx@otu_table[idx, ]
+df <- data.frame(oxalate = as.numeric(ps_mbx@otu_table[idx, ]), phenotype = ps_mbx@sam_data$phenotype)
+ggplot(df, aes(x = phenotype, y = oxalate, fill = phenotype)) + geom_boxplot() + stat_compare_means(method = "wilcox") + geom_jitter(width = 0.01)+
+  theme_bw()# higher despite eating fewer vegetables, which is generally where it comes from in the diet. 
+
+#related to kidney stones, checking bilirubin
+idx = grepl("bilirubin", taxa_names(ps_mbx))
+bilirubin = ps_mbx@otu_table[idx, ][9,]
+df <- data.frame(metabolite = as.numeric(bilirubin), phenotype = ps_mbx@sam_data$phenotype)
+ggplot(df, aes(x = phenotype, y = metabolite, fill = phenotype)) + geom_boxplot() + stat_compare_means(method = "wilcox") + geom_jitter(width = 0.01)+
+  theme_bw()
+
+
+# which species is oxalate related to?
+
+time1 <- subset_samples(ps_16s, ps_16s@sam_data$timepoint == "Timepoint 1")
+samples <- intersect(sample_names(time1), sample_names(ps_mbx))
+species <- time1@otu_table[ , samples]
+idx = grepl("oxalate", taxa_names(ps_mbx))
+oxalate = ps_mbx@otu_table[idx, samples]
+tests <- apply(species, 1, function(x){
+  print(length(x))
+  print(length(oxalate))
+  tmp = cor.test(as.numeric(x), as.numeric(oxalate), method = "spearman")
+  return(tmp)
+})
+estimate <- lapply(tests, function(x){
+  return(x$estimate[[1]])
+})
+pvals <- lapply(tests, function(x){
+  return(x$p.value)
+})
+df <- data.frame(estimate = as.numeric(estimate), pvals = as.numeric(pvals))
+rownames(df) <- names(estimate)
+df <- df[order(df$estimate, decreasing = T), ]
+
+# get taxa labels
+annot <- data.frame(ps_16s@tax_table)
+tmp <- annot[rownames(df), ]
+tmp$pval <- df$pvals
+tmp$estimate <- df$estimate
+View(tmp)
+
+
+#correlation with 5D
+idx = grepl("oxalate", taxa_names(ps_mbx))
+oxalate = ps_mbx@otu_table[idx, ]
+df <- data.frame(oxalate = as.numeric(oxalate), dodecenoate = as.numeric(ps_mbx@otu_table[grepl("dodecenoate", taxa_names(ps_mbx)), ]))
+cor.test(df$oxalate, df$dodecenoate, method = "spearman")
+df <- df[df$dodecenoate > 0, ]
+cor.test(df$oxalate, df$dodecenoate, method = "spearman")
+plot(df$oxalate, df$dodecenoate)
+
+
+# correlation with age
+df <- data.frame(oxalate = as.numeric(oxalate), age = as.numeric(ps_mbx@sam_data$age))
+cor.test(df$oxalate, df$age, method = "spearman")
+
+# 5D correlation with all metabolites
+dodecenoate <- as.numeric(ps_mbx@otu_table[grepl("dodecenoate", taxa_names(ps_mbx)), ])
+tests <- apply(ps_mbx@otu_table, 1, function(x){
+  return(cor.test(as.numeric(x), as.numeric(dodecenoate), method = "spearman"))
+})
+estimate <- lapply(tests, function(x){
+  return(x$estimate[[1]])
+})
+pvals <- lapply(tests, function(x){
+  return(x$p.value)
+})
+df <- data.frame(estimate = as.numeric(estimate), pvals = as.numeric(pvals), pvals_adj = p.adjust(pvals, method = "fdr"), row.names = names(pvals))
+View(df[order(df$estimate), ])
+df[grepl("nicotinamide", rownames(df)), ]
+```
+
+# Top differentially abundant metabolites
+```{r}
+pvals <- apply(ps_mbx@otu_table, 1, function(x){
+  pval <- wilcox.test(as.numeric(x[ps_mbx@sam_data$phenotype == "A"]), as.numeric(x[ps_mbx@sam_data$phenotype == "N"]))$p.value
+  return(pval)
+})
+sort(pvals)
+p_adj <- p.adjust(pvals, method = "fdr") 
+sort(p_adj)
+sum(p_adj< .2, na.rm = T)
+
+
+```
+
+# Cluster features by topic distribution
+```{r, fig.width = 50, fig.height = 20}
+
+
+keep <- apply(betas_mbx, 2, function(x) return(max(x) > .002))
+betas_mbx_use <- betas_mbx[, keep]
+p <- pheatmap(betas_mbx_use)
+
+clustering <- cutree(p$tree_col, k = 12)
+names(clustering) <-  colnames(betas_mbx_use)
+table(clustering)
+
+
+
+clustering[clustering == 12]
+clustering[clustering == 11]
+clustering[clustering == 10]
+clustering[clustering == 9]
+clustering[clustering == 8]
+clustering[clustering == 7]
+clustering[clustering == 6]
+clustering[clustering == 5]
+clustering[clustering == 4]
+
+
+
+
+keep <- apply(betas_16s, 2, function(x) return(max(x) > .004))
+betas_16s_use <- betas_16s[, keep]
+p <- pheatmap(betas_16s_use)
+
+
+
+keep <- apply(betas_mtg, 2, function(x) return(max(x) > .001))
+betas_mtg_use <- betas_mtg[, keep]
+p <- pheatmap(betas_mtg_use)
+
+
+keep <- apply(betas_mtt, 2, function(x) return(max(x) > .0005))
+keep2 <- sapply(colnames(betas_mtt), function(x) return(nchar(x) < 100))
+betas_mtt_use <- betas_mtt[, keep & keep2]
+p <- pheatmap(betas_mtt_use)
 ```
