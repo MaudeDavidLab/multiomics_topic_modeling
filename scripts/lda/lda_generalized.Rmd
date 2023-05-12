@@ -1,0 +1,417 @@
+---
+title: "lda_generalized"
+output: html_document
+date: "2023-04-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(phyloseq)
+library(DESeq2)
+library(slam)
+library(ggplot2)
+library(LDATS)
+library(topicmodels)
+
+library(lsa)
+library(dplyr)
+library(ape)
+library(pbapply)
+```
+
+
+```{r}
+model <- readRDS("../../results/latent_variable_modeling/models/16s_models_50000/model_16s_4topics_50000iter_0.05filter.rds")
+
+ps_16s <- readRDS("../../data/16s/ps_16s_dds_taxannotation.rds")
+ps_16s_filt <- filterByPrevalence(ps_16s, 0.05)
+```
+
+# Get pilot data and normalize it the same way
+```{r}
+
+ps_pilot <- readRDS("../../data/16s/ps_pilot.rds")
+colnames(ps_pilot@sam_data)[colnames(ps_pilot@sam_data) == "Treatment"] = "phenotype"
+
+filterByPrevalence <- function(ps, filter_thresh){
+  data <- round(ps@otu_table)
+  if(taxa_are_rows(ps)){
+    keep <- apply(data, 1, function(x) return(sum(x>0) > filter_thresh*nsamples(ps)))
+    data <- data[keep, ]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = T), sample_data(ps@sam_data))
+  }else{
+    keep <- apply(data, 2, function(x) return(sum(x > 0)> filter_thresh*nsamples(ps)))
+    data <- data[ , keep]
+    ps_new <- phyloseq(otu_table(data, taxa_are_rows = F), sample_data(ps@sam_data))
+  }
+  return(ps_new)
+}
+
+
+deSeqNorm <- function(ps, scale = F){
+  if(scale){
+    otu_table(ps) <- ps@otu_table / 100
+  }
+  ps_dds <- phyloseq_to_deseq2(ps, ~ phenotype)
+  ps_dds <- estimateSizeFactors(ps_dds, type = "poscounts")
+  ps_dds <- estimateDispersions(ps_dds)
+  abund <- getVarianceStabilizedData(ps_dds)
+  abund <- abund + abs(min(abund)) #don't allow deseq to return negative counts
+  ps_deSeq <- phyloseq(otu_table(abund, taxa_are_rows = T), sample_data(ps), tax_table = tax_table(ps))
+  return(ps_deSeq)
+}
+
+ps_pilot <- deSeqNorm(ps_pilot)
+ps_pilot_filt <- filterByPrevalence(ps_pilot, 0.05)
+
+```
+
+# Calculate posteriors on both datasets
+```{r}
+getLDAInput <- function(ps){
+  data.final <- t(round(ps@otu_table))
+  dtm=as.simple_triplet_matrix(data.final)
+  print(dim(dtm))
+  return(dtm)
+}
+
+getPosteriors <- function(ps, model){
+  dtm <- getLDAInput(ps)
+  model@terms <- taxa_names(ps)
+  tmp <- posterior(model, dtm)
+  thetas <- tmp$topics
+  return(thetas)
+}
+model@terms <- taxa_names(ps_16s_filt)
+sum(model@terms %in% taxa_names(ps_pilot))
+sum(taxa_names(ps_pilot) %in% model@terms) /ntaxa(ps_pilot) # 80% of sequences present in the model
+tmp_pilot <- posterior(model, getLDAInput(ps_pilot))
+terms_pilot <- tmp_pilot$terms
+topics_pilot <- tmp_pilot$topics
+
+tmp_m3 <- posterior(model, getLDAInput(ps_16s_filt))
+terms_m3 <- tmp_m3$terms
+topics_m3 <- topics_m3$topics
+
+```
+
+# Combine data
+```{r}
+ps_pilot@sam_data$study <- rep("Pilot", nsamples(ps_pilot))
+ps_topics_pilot <- phyloseq(otu_table(topics_pilot, taxa_are_rows = F), sample_data(ps_pilot@sam_data))
+ps_16s_filt@sam_data$study <- rep("M3", nsamples(ps_16s_filt))
+ps_topics_m3 <- phyloseq(otu_table(topics_m3, taxa_are_rows = F), sample_data(ps_16s_filt@sam_data))
+ps_topics_merge <- merge_phyloseq(ps_topics_m3, ps_topics_pilot)
+
+taxa <- intersect(taxa_names(ps_16s_filt), taxa_names(ps_pilot))
+ps_16s_filt <- prune_taxa(taxa, ps_16s_filt)
+ps_pilot <- prune_taxa(taxa, ps_pilot)
+ps_merge <- merge_phyloseq(ps_16s_filt, ps_pilot)
+```
+
+# ordinate
+```{r}
+ord <- ordinate(ps_merge)
+plot_ordination(ps_merge, ord, color = "study")+
+  theme_bw()+
+  ggtitle("Samples visualized by taxa distribution")
+
+
+ord <- ordinate(ps_topics_merge)
+plot_ordination(ps_topics_merge, ord, color = "study")+
+  theme_bw()+
+  ggtitle("Samples visualized by topic distribution")
+
+# We conclude that topic distributions across samples are broadly similar between these two studies
+```
+
+# Using stats- are topics themselves present in the same proportions across the population- no, the pilot population has a different topic distribution than the M3 population. Of course, because they are in fact different populations. One could compare population similarity using this method.
+```{r}
+# expected probabilities for each topic
+expected_probs <- colMeans(topics_m3)
+observed_probs <- colMeans(topics_pilot)
+
+stat_use = function(obsvd, exptd) {
+   sum((obsvd - exptd)^2 )
+}
+
+# was the new dataset drawn from the same dirichlettopic distribution?
+null_data <- sapply(sample_sums(ps_pilot), function(size){
+    return(rmultinom(n = 1, size = size, prob = expected_probs) / size)
+}) # let's draw 100,000 different topic distributions (samples) from the expected topic distribution. This means given that topics are expected to be distributed across the population in a given way, let's simulate some sample topic distributions
+colSums(null_data) # should all sum to 1 approximately
+
+stat_list <- apply(null_data, 2, stat_use, expected_probs) # how far away are those topic distributions from the expected distribution. This is the spread expected if topics are actually drawn from the m3 population distribution
+
+actual_stat <- stat_use(observed_probs, expected_probs) # now looking at a new dataset, are topics distributed across samples as expected, or really randomly?
+hist(stat_list, xlim = c(0, .02))
+abline(v = actual_stat) # answer, topics are distributed differently in the pilot population than in the M3 population. I suppose this isn't surprising
+
+pvalue <- sum(actual_stat < stat_list)/ length(stat_list)
+pvalue # 
+
+```
+
+# How well do these topics model the actual data - simulated counts
+```{r}
+library(LDATS)
+getSimulatedDataset <- function(ps, thetas, betas, n = 100, divisor = 1){
+  sim_seq_tab <- sim_LDA_data(N = round(sample_sums(ps)/divisor), Beta = betas, Theta = thetas)
+  
+  
+  #sim_seq_tab <- do.call("rbind", sim_list)
+  rownames(sim_seq_tab) <- sample_names(ps)
+  colnames(sim_seq_tab) <- colnames(betas)
+  return(sim_seq_tab)
+}
+
+betas <- exp(model@beta)
+colnames(betas) <- model@terms
+sim_counts <- getSimulatedDataset(ps_pilot, thetas = topics_pilot, betas = betas, n = "sample_counts", divisor = 1)
+
+# sample quantiles
+tmp <- quantileTest(t(ps_pilot@otu_table), sim_counts, type = "samples")
+line <- tmp$line
+
+# distance to actual counts
+dim(sim_counts)
+true_counts <- data.frame(t(ps_pilot@otu_table))
+dim(true_counts)
+
+missing_taxa <- setdiff(colnames(sim_counts), colnames(true_counts))
+sim_counts <- sim_counts[ , colnames(sim_counts) %in% colnames(true_counts)]
+#zeros <- data.frame(matrix(0, nrow(true_counts), length(missing_taxa)))
+#colnames(zeros) <- missing_taxa
+#true_counts <- data.frame(cbind(true_counts, zeros))                    
+
+dim(true_counts) == dim(sim_counts)
+true_counts <- t(apply(true_counts, 1, function(x){return(x / sum(x))}))
+sim_counts <- t(apply(sim_counts, 1, function(x){return(x / sum(x))}))
+sample_sim <- as.matrix(true_counts) %*% as.matrix(t(sim_counts))
+pheatmap(sample_sim, cluster_cols = F, cluster_rows = F)
+
+
+## 
+betas <- exp(model@beta)
+colnames(betas) <- model@terms
+
+iter = 100
+sim_counts_list <- lapply(seq(1, iter), function(i){
+  sim_counts <- getSimulatedDataset(ps_16s_filt, thetas = topics_m3, betas = betas, n = "sample_counts", divisor = 1)
+})
+library(purrr)
+sim_counts <- reduce(sim_counts_list, `+`) / iter
+
+# distance to actual counts
+dim(sim_counts)
+true_counts <- data.frame(t(ps_16s_filt@otu_table))
+dim(true_counts)
+
+missing_taxa <- setdiff(colnames(sim_counts), colnames(true_counts))
+sim_counts <- sim_counts[ , colnames(sim_counts) %in% colnames(true_counts)]
+#zeros <- data.frame(matrix(0, nrow(true_counts), length(missing_taxa)))
+#colnames(zeros) <- missing_taxa
+#true_counts <- data.frame(cbind(true_counts, zeros))                    
+
+dim(true_counts) == dim(sim_counts)
+true_counts <- t(apply(true_counts, 1, function(x){return(x / sum(x))}))
+sim_counts <- t(apply(sim_counts, 1, function(x){return(x / sum(x))}))
+sample_sim <- as.matrix(true_counts) %*% as.matrix(t(sim_counts))
+pheatmap(sample_sim)
+```
+
+# Are simulated counts from trained model closer to the original than simulated counts from untrained model?
+```{r}
+
+```
+
+# A topic is defined by a distribution over features. we have to know if the feature-feature relationships are the same in models trained on one dataset vs. the other
+```{r, fig.width = 4}
+library(pheatmap)
+# 1. Train 16s model on new dataset
+
+getLDAInput <- function(ps){
+  data.final <- t(round(ps@otu_table))
+  dtm=as.simple_triplet_matrix(data.final)
+  print(dim(dtm))
+  return(dtm)
+}
+
+
+trainModel <- function(ps, num_topics, iter){
+  print("making input")
+  dtm <- getLDAInput(ps)
+  print("finished making input")
+  
+  # label using molecule names
+  #matched <- match(colnames(dtm), taxa_names(ps))
+  #colnames(dtm) == taxa_names(ps)[matched]
+  #colnames(dtm) <- as.character(ps@tax_table[matched, 1])
+  #print("Added labels")
+  
+  #Train model
+  seed_num = 0
+  print("Beginning training...")
+  print(num_topics)
+  control = list(seed = seed_num, burnin = 40, iter = iter, verbose=10, keep = 1)
+  model <- LDA(dtm, k = num_topics, method = "Gibbs", control = control)
+  print("Finished training...")
+  
+  print(length(model@logLiks))
+  plot(seq(1, length(model@logLiks)), model@logLiks)
+  return(model)
+}
+
+model_pilot<- trainModel(ps_pilot_filt, num_topics = 4, iter = 5000)
+
+# 2. Load 16s model from first dataset
+ps_m3 <- readRDS("../../data/16s/ps_16s_dds_taxannotation.rds")
+ps_m3_filt <- filterByPrevalence(ps_m3, 0.05)
+model_m3 <- trainModel(ps_m3_filt, num_topics = 4, iter = 5000)
+
+# 3. get intersection of 80% of ASVs
+asvs <- intersect(taxa_names(ps_pilot_filt), taxa_names(ps_m3_filt))
+length(asvs)
+betas_pilot <- exp(model_pilot@beta)
+betas_m3 <- exp(model_m3@beta)
+colnames(betas_pilot) <- model_pilot@terms
+colnames(betas_m3) <- model_m3@terms
+betas_pilot <- betas_pilot[ , asvs]                  
+betas_m3 <- betas_m3[ , asvs]
+
+# 4. build hierarchical clustering tree based on betas matrix for each
+
+
+dist_cosine_pilot <- 1 - cosine(betas_pilot)
+dist_cosine_m3 <- 1 - cosine(betas_m3)
+test_actual <- mantel.test(dist_cosine_pilot, dist_cosine_m3)
+
+
+
+# 6. Permute leaves of one of the trees and calc. branch score similarity,
+
+null_entanglements <- pblapply(seq(1, 100), function(x){
+  set.seed(x)
+  print(x)
+  betas_pilot_null <- betas_pilot[ , sample(colnames(betas_pilot))]
+  dist_cosine_pilot <- 1 - cosine(betas_pilot_null)
+  m_test <- mantel.test(dist_cosine_pilot, dist_cosine_m3)
+  
+  return(m_test)
+})
+
+zscores <- unlist(lapply(null_entanglements, function(x) return(x$z.stat)))
+pscores <- unlist(lapply(null_entanglements, function(x) return(x$p)))
+
+
+p_16s <- ggplot(data.frame(zscores), aes(y = zscores)) + geom_histogram(fill = "lightblue", color = "black") + coord_flip() + theme_bw()+
+  geom_hline(yintercept = test_actual$z.stat, color = "darkred", lwd = 3)+
+  ggtitle("Topic generalization 16s")
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/topic_generalization_mantel_test_16s.pdf", p_16s, width = 5, height = 2)
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/topic_generalization_mantel_test_16s.png", p_16s, width = 5, height = 2)
+# feature to feature relationships match when looking at models trained on different datasets
+```
+
+# metabolite topic comparisions across populations
+```{r}
+
+metabolite_tab <- read.csv("~/Lab/M3/multiomics_topic_modeling/data/outside_datasets/telleria_metabolites/seqtab.csv", row.names = 1)
+metabolite_info <- read.csv("~/Lab/M3/multiomics_topic_modeling/data/outside_datasets/telleria_metabolites/metabolite_info.csv")
+mapping <- read.csv("~/Lab/M3/multiomics_topic_modeling/data/outside_datasets/telleria_metabolites/mapping.csv", row.names = 1)
+
+colnames(metabolite_tab) <- gsub("X", "", colnames(metabolite_tab))
+colnames(metabolite_tab) <- metabolite_info[match(colnames(metabolite_tab), metabolite_info$CHEM_ID), ]$Biochemical.Name
+
+# Normalize the same way that we did
+# Scale each metabolite to be median 1
+rleNorm <- function(ps, scale = F){
+  if(taxa_are_rows(ps)){
+    norm_factors <- edgeR::calcNormFactors(ps@otu_table, method = "RLE")
+    seqtab <- sweep(ps@otu_table, 2, norm_factors^2, '/')
+  }else{
+    norm_factors <- edgeR::calcNormFactors(t(ps@otu_table), method = "RLE")
+    seqtab <- sweep(t(ps@otu_table), 2, norm_factors^2, '/')
+  }
+  ps <- phyloseq(otu_table(seqtab, taxa_are_rows = T), sample_data = sample_data(ps))
+  return(ps)
+}
+
+metabolite_tab[is.na(metabolite_tab)] <- 0
+ps_new <- phyloseq(otu_table(metabolite_tab, taxa_are_rows = F), sample_data(mapping))
+ps_new <- rleNorm(ps_new) # flips dimensions
+counts <- ps_new@otu_table
+counts_adj <- apply(counts, 1, function(x) return(log(x)*9))
+
+counts_adj[counts_adj == -Inf] = 0
+
+otu_table(ps_new) <- otu_table(t(counts_adj), taxa_are_rows = T)
+ps_mbx_filt_new <- filterByPrevalence(ps_new, 0.1)
+model_telleria <- trainModel(ps_mbx_filt_new, num_topics = 7, iter = 1000)
+
+
+ps_mbx <- readRDS("../../data/mbx/ps_mbx_rle_nooutliers_adjcounts_fixedmapping.rds")
+ps_mbx_filt <- filterByPrevalence(ps_mbx, 0.1)
+model_m3 <- trainModel(ps_mbx_filt, num_topics = 7, iter = 1000)
+
+
+
+
+
+
+# 3. get intersection of 80% of ASVs
+library()
+compareModelsFeatureSpace <- function(ps1, ps2, model1, model2){
+  features <- intersect(taxa_names(ps1), taxa_names(ps2))
+  betas1 <- exp(model1@beta)
+  colnames(betas1) <- model1@terms
+  betas2 <- exp(model2@beta)
+  colnames(betas2) <- model2@terms
+  
+  betas1 <- betas1[ , features]
+  betas2 <- betas2[ , features]
+  
+  dist_cosine1 <- 1 - cosine(betas1)
+  dist_cosine2 <- 1 - cosine(betas2)
+  
+  test_actual <- mantel.test(dist_cosine1, dist_cosine2)
+  print(test_actual)
+  
+  null_entanglements <- pblapply(seq(1, 100), function(x){
+    set.seed(x)
+    print(x)
+    betas1 <- betas1[ , sample(colnames(betas1))]
+    dist_cosine1 <- 1 - cosine(betas1)
+    m_test <- mantel.test(dist_cosine1, dist_cosine2)
+  
+    return(m_test)
+  })
+  zscores <- unlist(lapply(null_entanglements, function(x) return(x$z.stat)))
+  pscores <- unlist(lapply(null_entanglements, function(x) return(x$p)))
+  
+  
+  p <- ggplot(data.frame(zscores), aes(y = zscores)) + geom_histogram(fill = "lightblue", color = "black") + coord_flip() + theme_bw()+
+    geom_hline(yintercept = test_actual$z.stat, color = "darkred", lwd = 3)+
+    ggtitle("Topic generalization MBX")
+  
+  return(list(zscores = zscores, pscores = pscores, p = p, test_actual = test_actual))
+  
+}
+
+metabolite_compare_res <- compareModelsFeatureSpace(ps1 = ps_mbx_filt_new, ps2 = ps_mbx_filt, model1 = model_telleria, model2 = model_m3)
+metabolite_compare_res
+
+ggsave("../../results/lda_topic_generalization_mbx_crc.jpeg", metabolite_compare_res$p, width = 4, height = 2)
+```
+
+```{r, fig.width = 6, fig.height = 2}
+library(ggpubr)
+p <- ggarrange(p_16s, metabolite_compare_res$p, labels = c("A", "B"))
+p
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/lda_generalization.pdf",p, width = 6, height = 2)
+ggsave("../../results/latent_variable_modeling/16s-4_mtg-5_mtt-4_mbx-7/lda_generalization.png",p, width = 6, height = 2)
+
+```
+
